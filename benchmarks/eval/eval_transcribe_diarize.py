@@ -232,6 +232,8 @@ def make_send_fn(
     model_path: str,
     language: str | None,
     max_new_tokens: int | None,
+    *,
+    stream: bool = False,
 ) -> SendFn:
     async def send_fn(
         session: aiohttp.ClientSession,
@@ -255,10 +257,16 @@ def make_send_fn(
                     model_path,
                     language,
                     max_new_tokens,
+                    stream=stream,
                 ),
             ) as response:
                 if response.status != 200:
                     result.error = f"HTTP {response.status}: {await response.text()}"
+                elif stream:
+                    result.text = await _consume_transcription_stream(
+                        response, result, start
+                    )
+                    result.is_success = True
                 else:
                     result.text = extract_prediction_text(await response.json())
                     result.is_success = True
@@ -278,6 +286,44 @@ def make_send_fn(
     return send_fn
 
 
+async def _consume_transcription_stream(
+    response: aiohttp.ClientResponse,
+    result: RequestResult,
+    start: float,
+) -> str:
+    """Read the SSE transcription stream, filling streaming latency metrics.
+
+    Records text_ttft_s on the first transcript.text.delta and the gaps
+    between subsequent deltas in inter_chunk_s. Returns the full text from
+    the terminal transcript.text.done event.
+    """
+    final_text: str | None = None
+    last_delta_t: float | None = None
+    async for raw_line in response.content:
+        line = raw_line.decode("utf-8").strip()
+        if not line.startswith("data: "):
+            continue
+        payload = line[len("data: ") :]
+        if payload == "[DONE]":
+            break
+        event = json.loads(payload)
+        event_type = event.get("type")
+        if event_type == "transcript.text.delta":
+            now = time.perf_counter()
+            if result.text_ttft_s is None:
+                result.text_ttft_s = now - start
+            elif last_delta_t is not None:
+                result.inter_chunk_s.append(now - last_delta_t)
+            last_delta_t = now
+        elif event_type == "transcript.text.done":
+            final_text = event.get("text")
+        elif event_type == "error":
+            raise ValueError(f"Stream error event: {event.get('error')}")
+    if not isinstance(final_text, str):
+        raise ValueError("Stream ended without a transcript.text.done event")
+    return final_text.strip()
+
+
 async def run_eval(
     samples: list[Movies800Sample],
     *,
@@ -290,6 +336,7 @@ async def run_eval(
     disable_tqdm: bool,
     request_timeout_s: int,
     max_new_tokens: int | None = None,
+    stream: bool = False,
 ) -> tuple[list[RequestResult], float]:
     runner = BenchmarkRunner(
         RunConfig(
@@ -307,6 +354,7 @@ async def run_eval(
             model_path=model_path,
             language=language,
             max_new_tokens=max_new_tokens,
+            stream=stream,
         ),
     )
     return outputs, runner.wall_clock_s
@@ -419,6 +467,15 @@ def _add_request_args(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=DEFAULT_MAX_NEW_TOKENS,
         help="Optional max_new_tokens forwarded to /v1/audio/transcriptions.",
+    )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help=(
+            "Use SSE streaming transcription (stream=true). Fills the "
+            "text_ttft_* and inter_chunk_* speed metrics; accuracy metrics "
+            "are computed on the final transcript as usual."
+        ),
     )
     parser.add_argument(
         "--asr-results-file",
@@ -539,6 +596,7 @@ def _run_requests_and_save(
             disable_tqdm=args.disable_tqdm,
             request_timeout_s=args.request_timeout_s,
             max_new_tokens=args.max_new_tokens,
+            stream=args.stream,
         )
     )
     _save_asr_results(args, samples, outputs, wall_clock_s)
@@ -910,10 +968,18 @@ def _request_form(
     model_path: str,
     language: str | None,
     max_new_tokens: int | None,
+    *,
+    stream: bool = False,
 ) -> aiohttp.FormData:
     form = aiohttp.FormData()
     form.add_field("model", model_path)
-    form.add_field("response_format", "verbose_json")
+    if stream:
+        # Note (gaoyang): verbose_json cannot stream; the plain text carries the same
+        # speaker/timestamp markup, which the metrics normalizer handles.
+        form.add_field("response_format", "json")
+        form.add_field("stream", "true")
+    else:
+        form.add_field("response_format", "verbose_json")
     if language:
         form.add_field("language", language)
     if max_new_tokens is not None:

@@ -89,6 +89,7 @@ def create_sglang_moss_transcribe_diarize_executor(
     context_length: int | None = None,
     mem_fraction_static: float | None = 0.80,
     mm_embedding_cache_size_bytes: int = 0,
+    encoder_cache_size_bytes: int = 0,
     enable_torch_compile: bool = False,
     encoder_torch_compile: bool = False,
     encoder_compile_buckets: Tuple[int, ...] = (1, 2, 3, 4),
@@ -157,6 +158,7 @@ def create_sglang_moss_transcribe_diarize_executor(
         model_worker.model_runner.init_device_graphs()
 
     init_mm_embedding_cache(mm_embedding_cache_size_bytes)
+    model_worker.model_runner.model.init_encoder_cache(encoder_cache_size_bytes)
 
     output_proc = SGLangOutputProcessor(
         capture_hidden=False,

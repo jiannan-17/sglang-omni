@@ -18,6 +18,7 @@ from sglang_omni.proto import OmniRequest, StagePayload
 
 _EOS = 999
 
+
 class _ByteTokenizer:
     """Token id → fixed bytes; UTF-8 decode with errors='replace'."""
 

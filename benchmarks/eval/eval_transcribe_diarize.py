@@ -974,7 +974,7 @@ def _request_form(
     form = aiohttp.FormData()
     form.add_field("model", model_path)
     if stream:
-        # Note (gaoyang): verbose_json cannot stream; the plain text carries the same
+        # note (guozhihao): verbose_json cannot stream; the plain text carries the same
         # speaker/timestamp markup, which the metrics normalizer handles.
         form.add_field("response_format", "json")
         form.add_field("stream", "true")

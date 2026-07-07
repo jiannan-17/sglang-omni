@@ -344,15 +344,15 @@ def make_moss_transcribe_diarize_stream_output_builder(
         req = getattr(req_data, "req", None)
         if req is None or req_output.data is None:
             return []
-        # While chunked prefill is still consuming prompt tokens, suppress
+        # note (guozhihao): while chunked prefill is still consuming prompt tokens, suppress
         # emission — prompt-side states would masquerade as output text.
-        if int(getattr(req, "is_chunked", 0) or 0) > 0:
+        if req.is_chunked > 0:
             return []
 
         stage_payload = getattr(req_data, "stage_payload", None)
         if stage_payload is None:
             return []
-        if not bool((stage_payload.request.params or {}).get("stream", False)):
+        if not (stage_payload.request.params or {}).get("stream", False):
             return []
 
         try:
@@ -371,7 +371,8 @@ def make_moss_transcribe_diarize_stream_output_builder(
         if not pending:
             return []
 
-        # Rate-limit: hold tokens until the interval elapses. last_emit == 0.0
+        # note (guozhihao): rate-limit by holding tokens until the interval elapses.
+        # last_emit == 0.0
         # means nothing was emitted yet — the first delta goes out immediately.
         # EOS always flushes the remaining buffer.
         now = time.perf_counter()
@@ -385,7 +386,7 @@ def make_moss_transcribe_diarize_stream_output_builder(
             return []
 
         delta = _decode_token_ids(tokenizer, pending, skip_special_tokens=True)
-        # Hold until the trailing multi-byte char completes.
+        # note (guozhihao): hold until the trailing multi-byte char completes.
         if delta.endswith("\ufffd"):
             return []
         pending.clear()
@@ -398,7 +399,7 @@ def make_moss_transcribe_diarize_stream_output_builder(
             OutgoingMessage(
                 request_id=request_id,
                 type="stream",
-                target=None,  # terminal stage → Coordinator
+                target=None,
                 data={
                     "text": delta,
                     "modality": "text",

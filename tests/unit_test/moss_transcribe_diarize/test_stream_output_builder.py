@@ -18,11 +18,6 @@ from sglang_omni.proto import OmniRequest, StagePayload
 
 _EOS = 999
 
-# ---------------------------------------------------------------------------
-# Mock helpers
-# ---------------------------------------------------------------------------
-
-
 class _ByteTokenizer:
     """Token id → fixed bytes; UTF-8 decode with errors='replace'."""
 
@@ -75,11 +70,6 @@ def _builder(vocab: dict[int, bytes], special: set[int] | None = None):
     )
 
 
-# ---------------------------------------------------------------------------
-# Emission gating
-# ---------------------------------------------------------------------------
-
-
 def test_emits_text_delta_when_streaming():
     builder = _builder({1: b"[0.00]"})
     rd = _make_req_data(stream=True)
@@ -90,7 +80,6 @@ def test_emits_text_delta_when_streaming():
     msg = msgs[0]
     assert msg.type == "stream"
     assert msg.request_id == "req-1"
-    # target=None routes to the Coordinator (terminal stage).
     assert msg.target is None
     assert msg.data == {"text": "[0.00]", "modality": "text", "stage_name": "asr"}
     assert msg.metadata == {"modality": "text", "token_id": 1}
@@ -101,7 +90,6 @@ def test_silent_when_not_streaming():
     rd = _make_req_data(stream=False)
 
     assert builder("req-1", rd, _make_req_output(1)) == []
-    # No per-request state is created for non-streaming requests.
     assert not hasattr(rd.req, "_moss_stream_pending_ids")
 
 
@@ -111,7 +99,6 @@ def test_silent_during_chunked_prefill():
 
     assert builder("req-1", rd, _make_req_output(1)) == []
 
-    # Once chunked prefill completes, emission resumes.
     rd.req.is_chunked = 0
     msgs = builder("req-1", rd, _make_req_output(1))
     assert [m.data["text"] for m in msgs] == ["A"]
@@ -134,11 +121,6 @@ def test_silent_when_req_or_payload_missing():
     assert builder("req-1", no_payload, _make_req_output(1)) == []
 
 
-# ---------------------------------------------------------------------------
-# Incremental detokenization
-# ---------------------------------------------------------------------------
-
-
 def test_incremental_deltas_across_tokens():
     builder = _builder({1: b"[S01]", 2: b" hello", 3: b" world"})
     rd = _make_req_data()
@@ -153,7 +135,6 @@ def test_incremental_deltas_across_tokens():
 
 def test_utf8_multibyte_hold_then_emit():
     """A 3-byte CJK char split across 3 tokens must hold until complete."""
-    # "你" is U+4F60 → b'\xe4\xbd\xa0'. Split byte-per-token.
     builder = _builder({1: b"\xe4", 2: b"\xbd", 3: b"\xa0", 4: b"ok"})
     rd = _make_req_data()
 
@@ -168,7 +149,6 @@ def test_utf8_multibyte_hold_then_emit():
 
 def test_interior_replacement_char_does_not_stall_stream():
     """Only a TRAILING U+FFFD is held; an interior one must flush normally."""
-    # 0x80 is a lone continuation byte → decodes to a permanent U+FFFD.
     builder = _builder({1: b"\x80", 2: b"ok"})
     rd = _make_req_data()
 
@@ -209,14 +189,8 @@ def test_per_request_state_is_isolated():
     assert [m.data["text"] for m in out1] == ["A"]
     assert [m.data["text"] for m in out2] == ["B"]
     assert [m.data["text"] for m in out1b] == ["B"]
-    # Emitted tokens leave the pending buffer; nothing lingers per request.
     assert rd1.req._moss_stream_pending_ids == []
     assert rd2.req._moss_stream_pending_ids == []
-
-
-# ---------------------------------------------------------------------------
-# Rate-limited (coalesced) emission
-# ---------------------------------------------------------------------------
 
 
 def _interval_builder(vocab: dict[int, bytes], interval_s: float):
@@ -240,7 +214,6 @@ def test_min_emit_interval_holds_then_eos_flushes():
     rd = _make_req_data()
 
     assert [m.data["text"] for m in builder("r", rd, _make_req_output(1))] == ["A"]
-    # Interval has not elapsed: held.
     assert builder("r", rd, _make_req_output(2)) == []
     assert builder("r", rd, _make_req_output(3)) == []
 

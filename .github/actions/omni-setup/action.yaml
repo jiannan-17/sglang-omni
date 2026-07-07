@@ -36,6 +36,10 @@ runs:
         echo "UV_CACHE_DIR=/data/omni-ci/uv-cache" >> "${GITHUB_ENV}"
         echo "UV_PYTHON_INSTALL_DIR=/data/omni-ci/uv-python" >> "${GITHUB_ENV}"
 
+    - name: Validate CI GPU lane
+      shell: bash
+      run: bash .github/scripts/validate_ci_gpu_lane.sh
+
     - name: Restore cache
       shell: bash
       env:

@@ -12,7 +12,7 @@ class _Counter:
     def __init__(self) -> None:
         self.cancelled = 0
 
-    def note_build_cancelled(self) -> None:
+    def note_cancelled(self) -> None:
         self.cancelled += 1
 
 
@@ -28,7 +28,7 @@ def _bare_scheduler(counter, executor, pending):
     """Construct only the scheduler state exercised by shutdown tests."""
     scheduler = object.__new__(OmniScheduler)
     scheduler._request_build_executor = executor
-    scheduler._request_build_counter = counter
+    scheduler._request_build_tracker = counter
     scheduler._pending_request_builds = pending
     scheduler._request_admission_lock = threading.RLock()
     return scheduler

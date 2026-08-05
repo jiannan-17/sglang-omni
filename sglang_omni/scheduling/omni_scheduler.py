@@ -58,6 +58,7 @@ from sglang_omni.proto.admin import (
     ADMIN_UPDATE_WEIGHTS_FROM_TENSOR,
     ADMIN_WEIGHTS_CHECKER,
 )
+from sglang_omni.scheduling.build_tracker import OutstandingBuildTracker
 from sglang_omni.scheduling.messages import IncomingMessage, OutgoingMessage
 from sglang_omni.vendor.sglang.server_args import override_server_args
 
@@ -193,7 +194,7 @@ class OmniScheduler:
         prefill_coalesce_when_idle: bool = False,
         request_build_max_workers: int = 1,
         request_build_max_pending: int | None = None,
-        request_build_counter: Any | None = None,
+        request_build_tracker: OutstandingBuildTracker | None = None,
         shutdown_callback: Callable[[], None] | None = None,
     ):
         self.inbox: _queue_mod.Queue[IncomingMessage] = _queue_mod.Queue()
@@ -202,11 +203,11 @@ class OmniScheduler:
 
         # --- Request builder: StagePayload → SGLangARRequestData ----------
         self._request_builder = request_builder
-        # Optional outstanding-build counter for request builds that may still
-        # add an item to a batch. With an executor, the scheduler increments on
-        # submit and decrements on cancel. The builder decrements after enqueue
-        # or when it can no longer add an item to the batch.
-        self._request_build_counter = request_build_counter
+        # Optional tracker for request builds that may still add an item to a
+        # batch. With an executor, the scheduler increments on submit and
+        # refunds cancels. The builder settles after enqueue or when it can no
+        # longer add an item to the batch.
+        self._request_build_tracker = request_build_tracker
         self._result_adapter = result_adapter
         self._model_runner = None
         self._stream_output_builder = stream_output_builder
@@ -251,12 +252,12 @@ class OmniScheduler:
         self._request_build_max_pending_observed = 0
         if (
             self._request_build_executor is not None
-            and self._request_build_counter is not None
+            and self._request_build_tracker is not None
         ):
-            # Increment the counter at submit to keep the batch window open for
+            # Increment the tracker at submit to keep the batch window open for
             # builds waiting in the executor queue. A build without an executor
-            # increments the counter when it starts.
-            self._request_build_counter.enable_submit_side_counting()
+            # increments the tracker when it starts.
+            self._request_build_tracker.enable_submit_side_counting()
 
         # --- Core scheduling state (read/written by upstream methods) -----
         self.server_args = server_args
@@ -869,18 +870,18 @@ class OmniScheduler:
                         or req_id in self._pending_request_builds
                     ):
                         continue
-                    counter = self._request_build_counter
-                    if counter is not None:
-                        # Increment before submit so the worker cannot decrement
-                        # the count before the scheduler increments it.
-                        counter.note_build_submitted()
+                    tracker = self._request_build_tracker
+                    if tracker is not None:
+                        # Increment before submit so the worker cannot settle
+                        # the build before the scheduler counts it.
+                        tracker.note_submitted()
                     try:
                         future = request_build_executor.submit(
                             self._run_request_builder, payload, active_stage
                         )
                     except BaseException:
-                        if counter is not None:
-                            counter.note_build_cancelled()
+                        if tracker is not None:
+                            tracker.note_cancelled()
                         raise
                     self._pending_request_builds[req_id] = (
                         payload,
@@ -1547,13 +1548,13 @@ class OmniScheduler:
             return
         executor.shutdown(wait=False, cancel_futures=True)
         self._request_build_executor = None
-        counter = self._request_build_counter
-        if counter is None:
+        tracker = self._request_build_tracker
+        if tracker is None:
             return
         # Builds cancelled by executor shutdown never run the builder code that
-        # decrements the outstanding-build count. Remove each cancelled build
-        # under the admission lock before decrementing, so abort() racing with
-        # shutdown cannot decrement the same count.
+        # settles the outstanding-build count. Remove each cancelled build
+        # under the admission lock before refunding, so abort() racing with
+        # shutdown cannot refund the same build twice.
         #
         # For example, if shutdown cancels the last queued build, its count
         # would stay at 1 even though it can no longer add an item to a batch.
@@ -1562,7 +1563,7 @@ class OmniScheduler:
                 future = self._pending_request_builds[req_id][2]
                 if future.cancelled():
                     del self._pending_request_builds[req_id]
-                    counter.note_build_cancelled()
+                    tracker.note_cancelled()
 
     def abort(self, request_id: str, *, defer_running_cleanup: bool = True) -> None:
         with self._request_admission_lock:
@@ -1586,10 +1587,10 @@ class OmniScheduler:
             pending = self._pending_request_builds.pop(request_id, None)
             if pending is not None:
                 cancelled = pending[2].cancel()
-                if cancelled and self._request_build_counter is not None:
+                if cancelled and self._request_build_tracker is not None:
                     # A build cancelled before it starts never reaches the code
-                    # that decrements its outstanding-build count.
-                    self._request_build_counter.note_build_cancelled()
+                    # that settles its outstanding-build count.
+                    self._request_build_tracker.note_cancelled()
             if self._backlogged_request_build_payloads:
                 retained = [
                     payload

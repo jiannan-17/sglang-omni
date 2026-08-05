@@ -316,13 +316,10 @@ def make_fun_asr_scheduler_adapters(
     def request_builder(payload: StagePayload) -> FunASRRequestData:
         if audio_encoder_service is None:
             return _build_request(payload)
-        # Count audio preparation because the request build may still add an
+        # Track audio preparation because the request build may still add an
         # item to the batch; otherwise the drain loop can flush too early.
-        audio_encoder_service.note_build_started()
-        try:
+        with audio_encoder_service.build_tracker.tracked_build():
             return _build_request(payload)
-        finally:
-            audio_encoder_service.note_build_finished()
 
     def result_adapter(data: FunASRRequestData) -> StagePayload:
         payload = data.stage_payload

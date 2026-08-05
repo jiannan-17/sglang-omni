@@ -150,6 +150,7 @@ def test_fun_asr_threads_generation_batch_and_request_build_policy(monkeypatch) 
     class _EncoderService:
         def __init__(self) -> None:
             self.close_calls = 0
+            self.build_tracker = object()
 
         def close(self) -> None:
             self.close_calls += 1
@@ -289,7 +290,7 @@ def test_fun_asr_pipeline_batch_wait_reaches_encoder_service(monkeypatch) -> Non
 
     def _capture_encoder_service(*args, **kwargs):
         captured.update(kwargs)
-        service = SimpleNamespace(close=lambda: None)
+        service = SimpleNamespace(close=lambda: None, build_tracker=object())
         created_services.append(service)
         return service
 
@@ -337,4 +338,4 @@ def test_fun_asr_pipeline_batch_wait_reaches_encoder_service(monkeypatch) -> Non
     assert captured["max_batch_size"] == 8
     assert captured["cache_max_entries"] == 4096
     assert captured["cache_max_bytes"] == 2 * 1024**3
-    assert scheduler.request_build_counter is created_services[0]
+    assert scheduler.request_build_tracker is created_services[0].build_tracker

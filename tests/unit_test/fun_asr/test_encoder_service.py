@@ -92,14 +92,11 @@ def _run_build(
     item: SimpleNamespace,
     after_start: Callable[[], object] | None = None,
 ) -> None:
-    """Run an encode and always decrement its outstanding-build count."""
-    service.note_build_started()
-    try:
+    """Run an encode inside a tracked build, as the request builder does."""
+    with service.build_tracker.tracked_build():
         if after_start is not None:
             after_start()
         service.encode_item(item)
-    finally:
-        service.note_build_finished()
 
 
 def _await(predicate: Callable[[], bool], timeout_s: float = 5.0) -> bool:
@@ -624,12 +621,12 @@ def test_inflight_build_holds_window_open_and_batches_pair() -> None:
     thread_b.start()
     assert _await(lambda: service._queue.qsize() == 1), "B never queued"
 
-    service.note_build_started()  # C may still add an item to the batch.
+    service.build_tracker.note_started()  # C may still add an item to the batch.
     gate.set()  # Let the drain pick up B while C remains counted.
     try:
         service.encode_item(_item(9103, 4))
     finally:
-        service.note_build_finished()
+        service.build_tracker.settle()
     thread_a.join(timeout=10)
     thread_b.join(timeout=10)
 
@@ -773,11 +770,11 @@ def test_failed_and_finished_builds_settle_the_counter() -> None:
     """A failed build decrements its count so later batches can flush."""
     service = _make_service(max_batch_wait_ms=500)
 
-    service.note_build_started()
+    service.build_tracker.note_started()
     assert service.stats()["outstanding_builds"] == 1
-    service.note_build_finished()
+    service.build_tracker.settle()
     assert service.stats()["outstanding_builds"] == 0
-    service.note_build_finished()
+    service.build_tracker.settle()
     assert service.stats()["outstanding_builds"] == 0
 
     bad_item = SimpleNamespace(hash=1, feature=None, precomputed_embeddings=None)
@@ -800,7 +797,7 @@ def test_dangling_build_does_not_deadlock_close(
     caplog.set_level(logging.INFO, logger="sglang_omni.models.fun_asr.encoder_service")
     service = _make_service(max_batch_wait_ms=200)
 
-    service.note_build_started()
+    service.build_tracker.note_started()
     item = _item(8_100, 4)
     thread = threading.Thread(target=service.encode_item, args=(item,))
     thread.start()
@@ -815,7 +812,7 @@ def test_dangling_build_does_not_deadlock_close(
     assert not service._thread.is_alive()
     assert item.precomputed_embeddings is not None
     assert "final stats" in caplog.text
-    service.note_build_finished()
+    service.build_tracker.settle()
 
 
 def test_wait_zero_and_batch_size_one_edges() -> None:
@@ -873,9 +870,9 @@ def test_merged_follower_settles_before_leader_finishes() -> None:
     follower_thread.start()
     assert _await(lambda: service.stats()["merged"] == 1), "follower never merged"
 
-    assert _await(lambda: service.stats()["outstanding_builds"] == 0), (
-        "merged follower left its build outstanding"
-    )
+    assert _await(
+        lambda: service.stats()["outstanding_builds"] == 0
+    ), "merged follower left its build outstanding"
     assert follower_thread.is_alive(), "follower should still be blocked on the leader"
 
     gate.set()
@@ -887,22 +884,22 @@ def test_merged_follower_settles_before_leader_finishes() -> None:
 def test_submit_side_counting_pairs_scheduler_count_with_builder_settle() -> None:
     """The counter increments and decrements once for a submitted build."""
     service = _make_service(max_batch_wait_ms=500)
-    service.enable_submit_side_counting()
+    service.build_tracker.enable_submit_side_counting()
 
-    service.note_build_submitted()
+    service.build_tracker.note_submitted()
     assert service.stats()["outstanding_builds"] == 1
-    service.note_build_started()
+    service.build_tracker.note_started()
     assert service.stats()["outstanding_builds"] == 1
     item = _item(9_600, 4)
     try:
         service.encode_item(item)
     finally:
-        service.note_build_finished()
+        service.build_tracker.settle()
     assert item.precomputed_embeddings is not None
     assert service.stats()["outstanding_builds"] == 0
 
-    service.note_build_submitted()
-    service.note_build_cancelled()
+    service.build_tracker.note_submitted()
+    service.build_tracker.note_cancelled()
     assert service.stats()["outstanding_builds"] == 0
 
 
@@ -910,21 +907,21 @@ def test_submitted_but_unstarted_build_holds_window_open() -> None:
     """A build waiting in the executor keeps the batch window open."""
     model = _StubModel()
     service = _make_service(model, max_batch_wait_ms=500)
-    service.enable_submit_side_counting()
+    service.build_tracker.enable_submit_side_counting()
     gate = threading.Event()
     model.encode_gate = gate
 
-    service.note_build_submitted()
+    service.build_tracker.note_submitted()
     thread_a = threading.Thread(target=_run_build, args=(service, _item(9_700, 4)))
     thread_a.start()
     assert _await(lambda: model.encode_calls == 1), "A never reached the encoder"
 
-    service.note_build_submitted()
+    service.build_tracker.note_submitted()
     thread_b = threading.Thread(target=_run_build, args=(service, _item(9_701, 4)))
     thread_b.start()
     assert _await(lambda: service._queue.qsize() == 1), "B never queued"
 
-    service.note_build_submitted()
+    service.build_tracker.note_submitted()
     gate.set()  # The drain picks up B while C waits in the executor queue.
     thread_c = threading.Thread(target=_run_build, args=(service, _item(9_702, 4)))
     thread_c.start()
@@ -934,3 +931,125 @@ def test_submitted_but_unstarted_build_holds_window_open() -> None:
     stats = service.stats()
     assert stats["batch_size_hist"] == {1: 1, 2: 1}, stats
     assert stats["outstanding_builds"] == 0, stats
+
+
+def test_settle_without_enqueue_wakes_waiting_drainer() -> None:
+    """A build that settles idle mid-window flushes the batch immediately.
+
+    The drain loop holds one item inside a 5s window while another tracked
+    build is outstanding. When that build settles without enqueueing (as a
+    cache hit, merge, failure, or cancel would), the idle notification must
+    wake the drain loop instead of letting it sleep until the deadline.
+    """
+    model = _StubModel()
+    service = _make_service(model, max_batch_wait_ms=5_000)
+    gate = threading.Event()
+    model.encode_gate = gate
+
+    thread_a = threading.Thread(target=_run_build, args=(service, _item(13_000, 4)))
+    thread_a.start()
+    assert _await(lambda: model.encode_calls == 1), "A never reached the encoder"
+
+    service.build_tracker.note_started()  # C: outstanding, never enqueues.
+    thread_b = threading.Thread(target=_run_build, args=(service, _item(13_001, 4)))
+    thread_b.start()
+    assert _await(lambda: service._queue.qsize() == 1), "B never queued"
+
+    gate.set()
+    thread_a.join(timeout=10)
+    # B's item was enqueued while the encoder was gated, so qsize dropping to
+    # zero proves the drainer picked it up; with C still counted the guard
+    # fails and the drainer is inside the window.
+    assert _await(lambda: service._queue.qsize() == 0), "drainer never took B"
+
+    service.build_tracker.settle()  # C settles idle: 1 -> 0 wakes the drainer.
+    thread_b.join(timeout=2)
+
+    assert not thread_b.is_alive(), "drainer slept until the window deadline"
+    stats = service.stats()
+    assert stats["batch_size_hist"] == {1: 2}, stats
+    assert stats["wakeup_flushes"] == 1, stats
+    assert stats["outstanding_builds"] == 0, stats
+
+
+def test_enqueue_then_delayed_settle_does_not_wait_full_window() -> None:
+    """The put -> drain -> settle interleaving must not cost a full window.
+
+    The drainer can consume an enqueued item and probe the tracker before the
+    producer reaches its settle. The count it sees is still positive, so it
+    enters the window; the settle landing afterwards must wake it.
+    """
+    service = _make_service(max_batch_wait_ms=5_000)
+    tracker = service.build_tracker
+    settle_reached = threading.Event()
+    release_settle = threading.Event()
+    original_settle = tracker.settle
+
+    def delayed_settle() -> None:
+        settle_reached.set()
+        assert release_settle.wait(timeout=10)
+        original_settle()
+
+    tracker.settle = delayed_settle  # type: ignore[method-assign]
+    try:
+        item = _item(13_100, 4)
+
+        def producer() -> None:
+            tracker.note_started()
+            try:
+                service.encode_item(item)
+            finally:
+                original_settle()
+
+        thread = threading.Thread(target=producer)
+        thread.start()
+        # _enqueue puts the item before it calls settle, so once the delayed
+        # settle is reached the item is in the queue while the count is still
+        # positive; qsize dropping to zero then proves the drainer consumed it
+        # and entered the window.
+        assert settle_reached.wait(timeout=5), "producer never reached settle"
+        assert _await(lambda: service._queue.qsize() == 0), "item never drained"
+
+        release_settle.set()
+        thread.join(timeout=2)
+
+        assert not thread.is_alive(), "drainer slept until the window deadline"
+        stats = service.stats()
+        assert stats["batch_size_hist"] == {1: 1}, stats
+        assert stats["wakeup_flushes"] == 1, stats
+        assert stats["outstanding_builds"] == 0, stats
+    finally:
+        tracker.settle = original_settle  # type: ignore[method-assign]
+
+
+def test_stuck_submitted_builds_hold_window_until_deadline() -> None:
+    """Submit-side counts for builds that cannot start bound latency, not liveness.
+
+    With submit-side counting, builds queued behind busy executor workers are
+    counted but cannot join the current batch. The window then waits out its
+    full deadline — the documented latency bound — and the batch still
+    flushes.
+    """
+    service = _make_service(max_batch_wait_ms=50)
+    tracker = service.build_tracker
+    tracker.enable_submit_side_counting()
+
+    tracker.note_submitted()  # A queued build that never starts.
+    tracker.note_submitted()  # Submit-side count for the real build below.
+    item = _item(13_200, 4)
+    start = time.monotonic()
+    with tracker.tracked_build():
+        service.encode_item(item)
+    elapsed = time.monotonic() - start
+
+    assert item.precomputed_embeddings is not None
+    assert elapsed >= 0.04, f"window should have waited ~50ms, took {elapsed:.3f}s"
+    stats = service.stats()
+    assert stats["batch_size_hist"] == {1: 1}, stats
+    assert stats["guard_flushes"] == 0, stats
+    assert stats["early_flushes"] == 0, stats
+    assert stats["wakeup_flushes"] == 0, stats
+    assert stats["outstanding_builds"] == 1, stats
+
+    tracker.note_cancelled()  # The stuck build is eventually refunded.
+    assert service.stats()["outstanding_builds"] == 0

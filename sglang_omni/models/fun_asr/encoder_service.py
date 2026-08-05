@@ -118,6 +118,20 @@ class FunASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Ten
         self._queue_wait_total_s = 0.0
         self._queue_wait_max_s = 0.0
         self._encoder_time_s = 0.0
+        # Queue depth includes only items ready to join a batch, not request
+        # builds still preparing one. Count those builds so the drain loop knows
+        # whether to keep waiting.
+        self._outstanding = 0
+        self._outstanding_lock = threading.Lock()
+        self._build_local = threading.local()
+        self._submit_side_counting = False
+
+        # Record batch sizes and counter-based early flushes.
+        self._batch_size_hist: dict[int, int] = {}
+        self._guard_flushes = 0
+        self._early_flushes = 0
+
+        # The base class starts the worker, so all worker state must exist first.
         super().__init__(worker_name="fun-asr-audio-encode")
 
     def close(self) -> None:
@@ -128,6 +142,51 @@ class FunASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Ten
             self._closed = True
             self._queue.put(_SHUTDOWN)
         self._thread.join(timeout=5)
+        logger.info(f"Fun-ASR pre-LM encoder final stats: {self.stats()}")
+
+    def enable_submit_side_counting(self) -> None:
+        """Count executor builds at scheduler submission.
+
+        A build can wait in the executor queue before its builder starts.
+        Counting at submit keeps the batch window open for that build.
+        """
+        self._submit_side_counting = True
+
+    def note_build_submitted(self) -> None:
+        """Increment the counter before a build enters the executor queue."""
+        with self._outstanding_lock:
+            self._outstanding += 1
+
+    def note_build_cancelled(self) -> None:
+        """Decrement the count for a build cancelled before it starts."""
+        with self._outstanding_lock:
+            self._outstanding -= 1
+
+    def note_build_started(self) -> None:
+        """Record that this thread must decrement one outstanding-build count.
+
+        A build without an executor increments the counter here; a submitted
+        build incremented it earlier. Every exit must decrement it once.
+        """
+        self._build_local.unsettled = True
+        if self._submit_side_counting:
+            return
+        with self._outstanding_lock:
+            self._outstanding += 1
+
+    def note_build_finished(self) -> None:
+        """Decrement this build's count unless an earlier path already did."""
+        self._settle_build()
+
+    def _settle_build(self) -> None:
+        if getattr(self._build_local, "unsettled", False):
+            self._build_local.unsettled = False
+            with self._outstanding_lock:
+                self._outstanding -= 1
+
+    def _outstanding_builds(self) -> int:
+        with self._outstanding_lock:
+            return self._outstanding
 
     def _enqueue(
         self,
@@ -144,6 +203,9 @@ class FunASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Ten
                     enqueued_at=time.perf_counter(),
                 )
             )
+        # Enqueue before decrementing the outstanding-build count so the drain
+        # loop cannot observe both zero outstanding builds and an empty queue.
+        self._settle_build()
 
     def encode_item(self, item: Any) -> None:
         """Block until ``item.precomputed_embeddings`` holds the LM embedding.
@@ -169,6 +231,7 @@ class FunASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Ten
             if self._is_valid(cached, expected_tokens):
                 with self._lock:
                     self._hits += 1
+                self._settle_build()
                 self.attach_embedding(item, cached)
                 return
             logger.warning(
@@ -201,6 +264,10 @@ class FunASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Ten
                         raise
             else:
                 self._merged += 1
+        # A merged request cannot add an item to the batch. Decrement its count
+        # before it waits so it does not keep the batch window open. The leader
+        # decrements its count in _enqueue().
+        self._settle_build()
         if cached is not None:
             self.attach_embedding(item, cached)
             return
@@ -226,7 +293,7 @@ class FunASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Ten
             )
         self.attach_embedding(item, embedding)
 
-    def stats(self) -> dict[str, int | float]:
+    def stats(self) -> dict[str, Any]:
         with self._lock:
             cache_lookups = self._hits + self._misses
             return {
@@ -239,6 +306,10 @@ class FunASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Ten
                 ),
                 "batches": self._batch_count,
                 "items": self._item_count,
+                "batch_size_hist": dict(sorted(self._batch_size_hist.items())),
+                "guard_flushes": self._guard_flushes,
+                "early_flushes": self._early_flushes,
+                "outstanding_builds": self._outstanding_builds(),
                 "queue_depth": self._queue.qsize(),
                 "queue_wait_avg_s": (
                     self._queue_wait_total_s / self._queue_wait_count
@@ -279,6 +350,14 @@ class FunASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Ten
         if first is _SHUTDOWN:
             return [], True
         batch = [cast(QueueEntry[Any], first)]
+        # Skip the window when no counted build can add another item and the
+        # queue is empty. Read the counter first: a build that decrements its
+        # count between these probes has already enqueued its item, so the queue
+        # probe sees it.
+        if self._outstanding_builds() == 0 and self._queue.qsize() == 0:
+            with self._lock:
+                self._guard_flushes += 1
+            return batch, False
         deadline = time.monotonic() + self._max_batch_wait_s
         shutdown = False
         while len(batch) < self._max_batch_size:
@@ -295,6 +374,11 @@ class FunASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Ten
                 shutdown = True
                 break
             batch.append(cast(QueueEntry[Any], queued))
+            # Stop when no counted build can add another item and the queue is empty.
+            if self._outstanding_builds() == 0 and self._queue.qsize() == 0:
+                with self._lock:
+                    self._early_flushes += 1
+                break
         return batch, shutdown
 
     def _next_batch(self) -> tuple[list[QueueEntry[Any]], bool]:
@@ -386,9 +470,16 @@ class FunASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Ten
                     # Note (Akazaakane): Retried items are single-item batches.
                     self._batch_count += retry_recovered
                     self._item_count += retry_recovered
+                    if retry_recovered:
+                        self._batch_size_hist[1] = (
+                            self._batch_size_hist.get(1, 0) + retry_recovered
+                        )
                 return
             self._batch_count += 1
             self._item_count += len(batch)
+            self._batch_size_hist[len(batch)] = (
+                self._batch_size_hist.get(len(batch), 0) + 1
+            )
             batch_count = self._batch_count
             item_count = self._item_count
         if batch_count % 50 == 1:

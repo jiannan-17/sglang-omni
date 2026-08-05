@@ -179,7 +179,7 @@ def make_fun_asr_scheduler_adapters(
             add_special_tokens=False,
         ).input_ids
 
-    def request_builder(payload: StagePayload) -> FunASRRequestData:
+    def _build_request(payload: StagePayload) -> FunASRRequestData:
         params = payload.request.params or {}
         prepared = prepare_audio(
             payload,
@@ -312,6 +312,17 @@ def make_fun_asr_scheduler_adapters(
             engine_start_s=time.perf_counter(),
             stage_payload=payload,
         )
+
+    def request_builder(payload: StagePayload) -> FunASRRequestData:
+        if audio_encoder_service is None:
+            return _build_request(payload)
+        # Count audio preparation because the request build may still add an
+        # item to the batch; otherwise the drain loop can flush too early.
+        audio_encoder_service.note_build_started()
+        try:
+            return _build_request(payload)
+        finally:
+            audio_encoder_service.note_build_finished()
 
     def result_adapter(data: FunASRRequestData) -> StagePayload:
         payload = data.stage_payload

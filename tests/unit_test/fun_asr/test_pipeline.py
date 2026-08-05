@@ -28,7 +28,7 @@ def test_fun_asr_config_uses_batched_stage_with_32_running_requests() -> None:
     assert config.stages[0].factory_args["pre_lm_cache_max_entries"] == 4096
     assert config.stages[0].factory_args["pre_lm_cache_size_bytes"] == 2 * 1024**3
     assert config.stages[0].factory_args["pre_lm_max_batch_size"] == 8
-    assert config.stages[0].factory_args["pre_lm_max_batch_wait_ms"] == 4
+    assert config.stages[0].factory_args["pre_lm_max_batch_wait_ms"] == 24
     assert config.stages[0].factory_args["request_build_max_workers"] == 8
     assert config.stages[0].factory_args["request_build_max_pending"] == 16
     assert (
@@ -243,3 +243,98 @@ def test_fun_asr_threads_generation_batch_and_request_build_policy(monkeypatch) 
         fun_asr_stages.create_sglang_fun_asr_executor("dummy")
 
     assert encoder_services[1].close_calls == 1
+
+
+def test_fun_asr_pipeline_batch_wait_reaches_encoder_service(monkeypatch) -> None:
+    """The pipeline preset wires its batch policy and outstanding-build counter."""
+    captured: dict[str, object] = {}
+
+    def tokenizer(text, add_special_tokens=False):
+        return SimpleNamespace(input_ids=[0] * len(text))
+
+    monkeypatch.setattr(
+        fun_asr_stages.AutoTokenizer,
+        "from_pretrained",
+        lambda *args, **kwargs: tokenizer,
+    )
+    monkeypatch.setattr(
+        fun_asr_stages.AutoFeatureExtractor,
+        "from_pretrained",
+        lambda *args, **kwargs: SimpleNamespace(nb_max_frames=500),
+    )
+    monkeypatch.setattr(
+        fun_asr_stages, "get_visible_gpu_sm_version", lambda gpu_id: None
+    )
+    monkeypatch.setattr(fun_asr_stages, "init_mm_embedding_cache", lambda size: None)
+    monkeypatch.setattr(
+        fun_asr_stages,
+        "make_fun_asr_scheduler_adapters",
+        lambda **kwargs: (object(), object()),
+    )
+    monkeypatch.setattr(
+        fun_asr_stages,
+        "make_fun_asr_stream_output_builder",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        fun_asr_stages, "SGLangOutputProcessor", lambda **kwargs: object()
+    )
+    monkeypatch.setattr(fun_asr_stages, "ModelRunner", lambda *args, **kwargs: object())
+    monkeypatch.setattr(fun_asr_stages, "OmniScheduler", SimpleNamespace)
+    monkeypatch.setattr(
+        fun_asr_stages, "build_cache_namespace", lambda *args, **kwargs: "ns"
+    )
+
+    created_services: list[SimpleNamespace] = []
+
+    def _capture_encoder_service(*args, **kwargs):
+        captured.update(kwargs)
+        service = SimpleNamespace(close=lambda: None)
+        created_services.append(service)
+        return service
+
+    monkeypatch.setattr(
+        fun_asr_stages, "FunASRPreLMEncoderService", _capture_encoder_service
+    )
+
+    def _fake_server_args_builder(model_path, context_length, **overrides):
+        server_args = FakeServerArgs(**overrides)
+        server_args.mm_attention_backend = None
+        return server_args
+
+    monkeypatch.setattr(
+        fun_asr_stages, "build_sglang_server_args", _fake_server_args_builder
+    )
+    model_worker = SimpleNamespace(model_runner=SimpleNamespace(model=object()))
+    infrastructure = (
+        model_worker,
+        object(),
+        object(),
+        object(),
+        object(),
+        object(),
+        object(),
+    )
+    monkeypatch.setattr(
+        fun_asr_stages,
+        "create_sglang_infrastructure_defer_cuda_graph",
+        lambda *args, **kwargs: (False, infrastructure),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        fun_asr_stages,
+        "validate_generation_batch_policy",
+        lambda **kwargs: None,
+        raising=False,
+    )
+
+    config = FunASRPipelineConfig(model_path="FunAudioLLM/Fun-ASR-Nano-2512-hf")
+    scheduler = fun_asr_stages.create_sglang_fun_asr_executor(
+        config.model_path, **config.stages[0].factory_args
+    )
+
+    assert captured["max_batch_wait_ms"] == 24
+    assert captured["max_batch_size"] == 8
+    assert captured["cache_max_entries"] == 4096
+    assert captured["cache_max_bytes"] == 2 * 1024**3
+    assert scheduler.request_build_counter is created_services[0]

@@ -279,6 +279,7 @@ def create_sglang_fun_asr_executor(
             async_decode_min_batch_size=async_decode_min_batch_size,
             request_build_max_workers=request_build_max_workers,
             request_build_max_pending=request_build_max_pending,
+            request_build_counter=audio_encoder_service,
             shutdown_callback=(
                 audio_encoder_service.close
                 if audio_encoder_service is not None

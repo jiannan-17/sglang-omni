@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 
 import pytest
@@ -71,15 +72,43 @@ def _make_service(
     *,
     cache_max_entries: int = 16,
     cache_max_bytes: int = 1 << 20,
+    max_batch_size: int = 8,
+    max_batch_wait_ms: int = 4,
 ) -> FunASRPreLMEncoderService:
     service = FunASRPreLMEncoderService(
         model or _StubModel(),
         cache_namespace=_NAMESPACE,
         cache_max_entries=cache_max_entries,
         cache_max_bytes=cache_max_bytes,
+        max_batch_size=max_batch_size,
+        max_batch_wait_ms=max_batch_wait_ms,
     )
     _SERVICES.append(service)
     return service
+
+
+def _run_build(
+    service: FunASRPreLMEncoderService,
+    item: SimpleNamespace,
+    after_start: Callable[[], object] | None = None,
+) -> None:
+    """Run an encode and always decrement its outstanding-build count."""
+    service.note_build_started()
+    try:
+        if after_start is not None:
+            after_start()
+        service.encode_item(item)
+    finally:
+        service.note_build_finished()
+
+
+def _await(predicate: Callable[[], bool], timeout_s: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.002)
+    return predicate()
 
 
 def _item(
@@ -560,3 +589,348 @@ def test_build_cache_namespace_is_stable_and_scoped() -> None:
         text_config=SimpleNamespace(hidden_size=_HIDDEN_SIZE), marker="other"
     )
     assert namespace != build_cache_namespace(changed_config, **base)
+
+
+# --- Outstanding-build counting and batching -------------------------------
+# Use generous windows and assert batch composition instead of wall-clock time.
+
+
+def test_cold_single_request_flushes_immediately() -> None:
+    """A lone request flushes when no counted build can add a batch item."""
+    service = _make_service(max_batch_wait_ms=500)
+
+    item = _item(9001, 4)
+    _run_build(service, item)
+
+    assert item.precomputed_embeddings is not None
+    stats = service.stats()
+    assert stats["guard_flushes"] == 1, stats
+    assert stats["batch_size_hist"] == {1: 1}, stats
+    assert stats["outstanding_builds"] == 0, stats
+
+
+def test_inflight_build_holds_window_open_and_batches_pair() -> None:
+    """B's batch window stays open while C may still add an item."""
+    model = _StubModel()
+    service = _make_service(model, max_batch_wait_ms=500)
+    gate = threading.Event()
+    model.encode_gate = gate
+
+    thread_a = threading.Thread(target=_run_build, args=(service, _item(9101, 4)))
+    thread_a.start()
+    assert _await(lambda: model.encode_calls == 1), "A never reached the encoder"
+
+    thread_b = threading.Thread(target=_run_build, args=(service, _item(9102, 4)))
+    thread_b.start()
+    assert _await(lambda: service._queue.qsize() == 1), "B never queued"
+
+    service.note_build_started()  # C may still add an item to the batch.
+    gate.set()  # Let the drain pick up B while C remains counted.
+    try:
+        service.encode_item(_item(9103, 4))
+    finally:
+        service.note_build_finished()
+    thread_a.join(timeout=10)
+    thread_b.join(timeout=10)
+
+    stats = service.stats()
+    assert stats["batch_size_hist"] == {1: 1, 2: 1}, stats
+    assert stats["guard_flushes"] == 1, stats
+    assert stats["early_flushes"] == 1, stats
+    assert stats["outstanding_builds"] == 0, stats
+
+
+def test_closed_loop_c2_pairs_every_round() -> None:
+    """Each c=2 round forms a two-item batch while one build is outstanding."""
+    service = _make_service(max_batch_wait_ms=500)
+    rounds = 30
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def producer(base: int) -> None:
+        try:
+            for round_no in range(rounds):
+                _run_build(
+                    service,
+                    _item(base + round_no, 4),
+                    after_start=lambda: barrier.wait(timeout=10),
+                )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=producer, args=(base,)) for base in (10_000, 20_000)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert not errors, errors
+    stats = service.stats()
+    assert stats["batch_size_hist"] == {2: rounds}, stats
+    assert stats["guard_flushes"] == 0, stats
+    assert stats["early_flushes"] == rounds, stats
+    assert stats["outstanding_builds"] == 0, stats
+
+
+def test_concurrency_migration_keeps_batching_correct_per_phase() -> None:
+    """Changing concurrency does not affect batch sizes in later phases."""
+    service = _make_service(max_batch_wait_ms=500)
+
+    for round_no in range(3):
+        _run_build(service, _item(1_000 + round_no, 4))
+
+    def paired_rounds(bases: tuple[int, int], rounds: int) -> None:
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def producer(base: int) -> None:
+            try:
+                for round_no in range(rounds):
+                    _run_build(
+                        service,
+                        _item(base + round_no, 4),
+                        after_start=lambda: barrier.wait(timeout=10),
+                    )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=producer, args=(base,)) for base in bases]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        assert not errors, errors
+
+    paired_rounds((2_000, 3_000), 3)
+
+    burst_barrier = threading.Barrier(32)
+    burst_errors: list[BaseException] = []
+
+    def burst_producer(base: int) -> None:
+        try:
+            _run_build(
+                service,
+                _item(base, 4),
+                after_start=lambda: burst_barrier.wait(timeout=10),
+            )
+        except BaseException as exc:  # noqa: BLE001
+            burst_errors.append(exc)
+
+    burst_threads = [
+        threading.Thread(target=burst_producer, args=(4_000 + idx,))
+        for idx in range(32)
+    ]
+    for thread in burst_threads:
+        thread.start()
+    for thread in burst_threads:
+        thread.join(timeout=60)
+    assert not burst_errors, burst_errors
+
+    paired_rounds((5_000, 6_000), 3)
+
+    stats = service.stats()
+    assert stats["batch_size_hist"] == {1: 3, 2: 6, 8: 4}, stats
+    assert stats["guard_flushes"] == 3, stats
+    assert stats["outstanding_builds"] == 0, stats
+
+
+def test_long_idle_then_burst_batches_together() -> None:
+    """A new burst batches normally after the worker has been idle."""
+    service = _make_service(max_batch_wait_ms=500)
+    _run_build(service, _item(7_000, 4))
+
+    barrier = threading.Barrier(4)
+    errors: list[BaseException] = []
+
+    def producer(base: int) -> None:
+        try:
+            _run_build(
+                service,
+                _item(base, 4),
+                after_start=lambda: barrier.wait(timeout=10),
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=producer, args=(7_100 + idx,)) for idx in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    stats = service.stats()
+    assert stats["batch_size_hist"] == {1: 1, 4: 1}, stats
+    assert stats["early_flushes"] == 1, stats
+    assert stats["outstanding_builds"] == 0, stats
+
+
+def test_failed_and_finished_builds_settle_the_counter() -> None:
+    """A failed build decrements its count so later batches can flush."""
+    service = _make_service(max_batch_wait_ms=500)
+
+    service.note_build_started()
+    assert service.stats()["outstanding_builds"] == 1
+    service.note_build_finished()
+    assert service.stats()["outstanding_builds"] == 0
+    service.note_build_finished()
+    assert service.stats()["outstanding_builds"] == 0
+
+    bad_item = SimpleNamespace(hash=1, feature=None, precomputed_embeddings=None)
+    with pytest.raises(RuntimeError, match="num_audio_tokens"):
+        _run_build(service, bad_item)
+    assert service.stats()["outstanding_builds"] == 0
+
+    item = _item(8_000, 4)
+    _run_build(service, item)
+    assert item.precomputed_embeddings is not None
+    stats = service.stats()
+    assert stats["guard_flushes"] == 1, stats
+    assert stats["batch_size_hist"] == {1: 1}, stats
+
+
+def test_dangling_build_does_not_deadlock_close(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Shutdown terminates the worker despite an outstanding-build count."""
+    caplog.set_level(logging.INFO, logger="sglang_omni.models.fun_asr.encoder_service")
+    service = _make_service(max_batch_wait_ms=200)
+
+    service.note_build_started()
+    item = _item(8_100, 4)
+    thread = threading.Thread(target=service.encode_item, args=(item,))
+    thread.start()
+    assert _await(
+        lambda: service._queue.qsize() == 1 or item.precomputed_embeddings is not None
+    )
+
+    service.close()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert not service._thread.is_alive()
+    assert item.precomputed_embeddings is not None
+    assert "final stats" in caplog.text
+    service.note_build_finished()
+
+
+def test_wait_zero_and_batch_size_one_edges() -> None:
+    """Zero wait and batch size one still produce immediate single-item batches."""
+    instant = _make_service(max_batch_wait_ms=0)
+    for idx in range(2):
+        _run_build(instant, _item(8_200 + idx, 4))
+    stats = instant.stats()
+    assert stats["batch_size_hist"] == {1: 2}, stats
+
+    singles = _make_service(max_batch_size=1, max_batch_wait_ms=500)
+    barrier = threading.Barrier(3)
+    errors: list[BaseException] = []
+
+    def producer(base: int) -> None:
+        try:
+            _run_build(
+                singles,
+                _item(base, 4),
+                after_start=lambda: barrier.wait(timeout=10),
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=producer, args=(8_300 + idx,)) for idx in range(3)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    stats = singles.stats()
+    assert stats["batch_size_hist"] == {1: 3}, stats
+    assert stats["outstanding_builds"] == 0, stats
+
+
+def test_merged_follower_settles_before_leader_finishes() -> None:
+    """A merged request decrements its count because it adds no batch item."""
+    model = _StubModel()
+    service = _make_service(model, max_batch_wait_ms=500)
+    gate = threading.Event()
+    model.encode_gate = gate
+
+    leader_thread = threading.Thread(
+        target=service.encode_item, args=(_item(9_500, 4),)
+    )
+    leader_thread.start()
+    assert _await(lambda: model.encode_calls == 1), "leader never reached the encoder"
+
+    follower_thread = threading.Thread(
+        target=_run_build, args=(service, _item(9_500, 4))
+    )
+    follower_thread.start()
+    assert _await(lambda: service.stats()["merged"] == 1), "follower never merged"
+
+    assert _await(lambda: service.stats()["outstanding_builds"] == 0), (
+        "merged follower left its build outstanding"
+    )
+    assert follower_thread.is_alive(), "follower should still be blocked on the leader"
+
+    gate.set()
+    leader_thread.join(timeout=10)
+    follower_thread.join(timeout=10)
+    assert service.stats()["outstanding_builds"] == 0
+
+
+def test_submit_side_counting_pairs_scheduler_count_with_builder_settle() -> None:
+    """The counter increments and decrements once for a submitted build."""
+    service = _make_service(max_batch_wait_ms=500)
+    service.enable_submit_side_counting()
+
+    service.note_build_submitted()
+    assert service.stats()["outstanding_builds"] == 1
+    service.note_build_started()
+    assert service.stats()["outstanding_builds"] == 1
+    item = _item(9_600, 4)
+    try:
+        service.encode_item(item)
+    finally:
+        service.note_build_finished()
+    assert item.precomputed_embeddings is not None
+    assert service.stats()["outstanding_builds"] == 0
+
+    service.note_build_submitted()
+    service.note_build_cancelled()
+    assert service.stats()["outstanding_builds"] == 0
+
+
+def test_submitted_but_unstarted_build_holds_window_open() -> None:
+    """A build waiting in the executor keeps the batch window open."""
+    model = _StubModel()
+    service = _make_service(model, max_batch_wait_ms=500)
+    service.enable_submit_side_counting()
+    gate = threading.Event()
+    model.encode_gate = gate
+
+    service.note_build_submitted()
+    thread_a = threading.Thread(target=_run_build, args=(service, _item(9_700, 4)))
+    thread_a.start()
+    assert _await(lambda: model.encode_calls == 1), "A never reached the encoder"
+
+    service.note_build_submitted()
+    thread_b = threading.Thread(target=_run_build, args=(service, _item(9_701, 4)))
+    thread_b.start()
+    assert _await(lambda: service._queue.qsize() == 1), "B never queued"
+
+    service.note_build_submitted()
+    gate.set()  # The drain picks up B while C waits in the executor queue.
+    thread_c = threading.Thread(target=_run_build, args=(service, _item(9_702, 4)))
+    thread_c.start()
+    for thread in (thread_a, thread_b, thread_c):
+        thread.join(timeout=10)
+
+    stats = service.stats()
+    assert stats["batch_size_hist"] == {1: 1, 2: 1}, stats
+    assert stats["outstanding_builds"] == 0, stats

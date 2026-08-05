@@ -21,6 +21,14 @@ _AUDIO_PAD_ID = 42  # arbitrary sentinel distinct from vocabulary ids below
 
 
 class _UnexpectedEncoderService:
+    """Encoder stub whose encode path must remain unused."""
+
+    def note_build_started(self) -> None:
+        pass
+
+    def note_build_finished(self) -> None:
+        pass
+
     def encode_item(self, _item: object) -> None:
         pytest.fail("invalid requests must not be encoded")
 
@@ -144,7 +152,14 @@ def test_fun_asr_request_builder_encodes_after_offsets_are_final(monkeypatch) ->
     observed: dict[str, object] = {}
 
     class _EncoderService:
+        def note_build_started(self) -> None:
+            observed["builds_started"] = observed.get("builds_started", 0) + 1
+
+        def note_build_finished(self) -> None:
+            observed["builds_finished"] = observed.get("builds_finished", 0) + 1
+
         def encode_item(self, item) -> None:
+            observed["started_before_encode"] = observed.get("builds_started") == 1
             observed["offsets"] = item.offsets
             observed["num_audio_tokens"] = item.num_audio_tokens
             observed["audio_fingerprint"] = item.audio_fingerprint
@@ -171,6 +186,9 @@ def test_fun_asr_request_builder_encodes_after_offsets_are_final(monkeypatch) ->
     assert observed["audio_fingerprint"] == audio_fingerprint(audio)
     assert item.feature is None
     assert item.precomputed_embeddings.shape[0] == 3
+    assert observed["started_before_encode"] is True
+    assert observed["builds_started"] == 1
+    assert observed["builds_finished"] == 1
 
 
 def test_fun_asr_request_builder_language_prompt(monkeypatch) -> None:

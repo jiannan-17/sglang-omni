@@ -45,9 +45,11 @@ class WhisperASREngineBuilder(AsrEngineBuilder):
         self.context_length = (
             self.encoder_token_count + MAX_PREV_CONTEXT_TOKENS + self.max_new_tokens + 8
         )
-        # prev_context_len + prefix_len + max_new_tokens <= decoder_context_len
+        # note (jiannan-17): prev_len + prefix_len + max_new_tokens <= decoder_context_len
         self.decoder_context_len = int(
-            getattr(AutoConfig.from_pretrained(checkpoint_dir), "max_target_positions", 0)
+            getattr(
+                AutoConfig.from_pretrained(checkpoint_dir), "max_target_positions", 0
+            )
             or 448
         )
 

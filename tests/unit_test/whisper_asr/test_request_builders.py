@@ -40,7 +40,7 @@ class _FakeTokenizer:
 
     def get_prompt_ids(self, text: str, return_tensors=None) -> list[int]:
         assert return_tensors is None
-        # One token per character keeps truncation arithmetic transparent.
+        # note (jiannan-17): One token per character keeps truncation arithmetic transparent.
         return [_SOT_PREV] + [1000 + i for i in range(len(text))]
 
 
@@ -103,7 +103,7 @@ def test_request_builder_truncates_prompt_to_tail(monkeypatch) -> None:
     prev_context = data.prompt_token_ids[: -len(_PREFIX)]
     assert len(prev_context) == 224
     assert prev_context[0] == _SOT_PREV
-    # The last 223 of the 300 prompt tokens survive: ids 1077..1299.
+    # note (jiannan-17): The last 223 of the 300 prompt tokens survive (ids 1077..1299).
     assert prev_context[1:] == [1000 + i for i in range(77, 300)]
     assert data.prompt_token_ids[-len(_PREFIX) :] == _PREFIX
 
@@ -121,7 +121,7 @@ def test_request_builder_shrinks_prompt_budget_for_large_max_new_tokens(
     data = _build(monkeypatch, {"prompt": "x" * 300, "max_new_tokens": 300})
 
     prev_context = data.prompt_token_ids[: -len(_PREFIX)]
-    # 448 total - 4 prefix - 300 generated = 144 previous-context positions.
+    # note (jiannan-17): 448 total - 4 prefix - 300 generated = 144 previous-context positions.
     assert len(prev_context) == 144
     assert prev_context[0] == _SOT_PREV
     assert prev_context[1:] == [1000 + i for i in range(157, 300)]
@@ -134,7 +134,7 @@ def test_request_builder_drops_prompt_when_generation_fills_context(
     data = _build(monkeypatch, {"prompt": "hello", "max_new_tokens": 500})
 
     assert data.prompt_token_ids == _PREFIX
-    # The four-token prefix leaves 444 decoder positions for generation.
+    # note (jiannan-17): The four-token prefix leaves 444 decoder positions for generation.
     assert data.max_new_tokens == 448 - len(_PREFIX)
 
 

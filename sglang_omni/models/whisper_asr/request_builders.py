@@ -22,9 +22,9 @@ from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 
 _WHISPER_SAMPLE_RATE = 16000
-# Previous context = 1 start-of-prev token + up to 223 prompt tokens.
+# note (jiannan-17): Previous context = 1 start-of-prev token + up to 223 prompt tokens.
 MAX_PREV_CONTEXT_TOKENS = 224
-# Standard Whisper decoder context: 448 positions.
+# note (jiannan-17): Standard Whisper decoder context is 448 positions.
 _DEFAULT_DECODER_CONTEXT_LEN = 448
 _LANGUAGE_ALIASES = {
     "en": "english",
@@ -97,8 +97,8 @@ def _build_prev_context_tokens(
     if not text:
         return []
     sot_prev_id, *text_ids = tokenizer.get_prompt_ids(text, return_tensors=None)
-    # Recent text is the most useful continuation context, so truncate from the
-    # front while preserving the required <|startofprev|> marker.
+    # note (jiannan-17): Recent text is the most useful continuation context, so
+    # truncate from the front while preserving the required <|startofprev|> marker.
     return [sot_prev_id] + text_ids[-(max_prev_tokens - 1) :]
 
 
@@ -117,8 +117,8 @@ def make_whisper_scheduler_adapters(
     eos_token_id = int(tokenizer.eos_token_id)
     pad_token_id = int(tokenizer.pad_token_id or eos_token_id)
     vocab_size = int(tokenizer.vocab_size)
-    # Prefer the decoder limit passed by the caller. Fall back to
-    # generation_config.max_length, then to Whisper's default 448 positions.
+    # note (jiannan-17): Prefer the decoder limit passed by the caller. Fall back
+    # to generation_config.max_length, then to Whisper's default 448 positions.
     decoder_context_len = int(
         decoder_context_len
         or getattr(generation_config, "max_length", None)
@@ -152,8 +152,8 @@ def make_whisper_scheduler_adapters(
             tokenizer, params.get("prompt"), max_prev_tokens=max_prev_tokens
         )
         prompt_token_ids = prev_context_ids + prefix_token_ids
-        # Keep the invariant at the assembly boundary so future changes fail
-        # before an out-of-range decoder position reaches the GPU.
+        # note (jiannan-17): Keep the invariant at the assembly boundary so future
+        # changes fail before an out-of-range decoder position reaches the GPU.
         if len(prompt_token_ids) + request_max_new_tokens > decoder_context_len:
             raise ValueError(
                 "Whisper decoder budget exceeded: "

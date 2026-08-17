@@ -1435,18 +1435,19 @@ def test_qwen3_tts_deterministic_streaming_vocoder_decodes_each_plan_at_b1() -> 
             absolute_emitted_frames=0,
             generated_frames=3,
             window_start=0,
+            emitted_generated_frames=0,
         )
         for value in (1, 2, 3)
     ]
 
-    waveforms = scheduler._run_decode_plans(plans, stream=None)
+    deltas = scheduler._launch_decode_plans(plans, stream=None).resolve()
 
     assert [tuple(item.shape) for item in tokenizer.model.decoder.decode_inputs] == [
         (1, 2, 3),
         (1, 2, 3),
         (1, 2, 3),
     ]
-    assert [item.tolist() for item in waveforms] == [
+    assert [item.tolist() for item in deltas] == [
         [float(value)] * 12 for value in (1, 2, 3)
     ]
     assert scheduler._initial_decode_graphs._batch_sizes == (1,)
@@ -1600,7 +1601,7 @@ def test_qwen3_tts_streaming_vocoder_avoids_cuda_value_sync() -> None:
     assert scheduler.validate_chunk("request", state, Codes()) is chunk
 
 
-def test_qwen3_tts_decode_stream_waits_for_codec_staging(
+def test_qwen3_tts_decode_stream_waits_for_input_producer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scheduler = Qwen3TTSStreamingVocoderScheduler(
@@ -1643,9 +1644,377 @@ def test_qwen3_tts_decode_stream_waits_for_codec_staging(
         lambda stream: StreamContext(),
     )
 
-    scheduler._run_decode_plans([plan], stream=decode_stream)
+    handle = scheduler._launch_decode_plans([plan], stream=decode_stream)
+    handle.resolve()
 
     assert events[0] == ("wait", producer_stream)
+
+
+def test_qwen3_tts_pageable_fallback_syncs_with_empty_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty .cpu() copies enqueue no D2H work, so fallback synchronizes explicitly."""
+
+    class ShortDecoder(_FakeQwen3TTSDecoder):
+        def chunked_decode(self, codes: torch.Tensor) -> torch.Tensor:
+            return torch.zeros((codes.shape[0], 1, 8), dtype=torch.float32)
+
+    tokenizer = _FakeQwen3TTSTokenizer()
+    tokenizer.model.decoder = ShortDecoder()
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        tokenizer,
+        device="cpu",
+    )
+    state = scheduler.create_stream_state("request")
+    state.num_quantizers = 2
+    state.code_chunks.append(torch.ones((5, 2), dtype=torch.long))
+    state.total_frames = 5
+    state.emitted_generated_frames = 4
+    state.next_decode_generated_frames = 5
+    plan = scheduler._build_decode_plan(state, is_final=True)
+    assert plan is not None
+
+    events: list[str] = []
+
+    class DecodeStream:
+        def wait_stream(self, stream):
+            events.append("wait")
+
+        def synchronize(self):
+            events.append("stream_synchronize")
+
+    class StreamContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device: object())
+    monkeypatch.setattr(torch.cuda, "stream", lambda stream: StreamContext())
+
+    handle = scheduler._launch_decode_plans([plan], stream=DecodeStream())
+
+    assert (
+        "stream_synchronize" in events
+    ), "all-empty batch must wait for the decode stream"
+    assert handle.event is None
+    delta = handle.resolve()[0]
+    assert delta.numel() == 0
+    with pytest.raises(RuntimeError, match="empty delta"):
+        scheduler._commit_decode_plan(state, plan, delta)
+
+
+def test_qwen3_tts_decode_launch_defers_resolve_to_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinned staging records a completion event at launch and waits in resolve()."""
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+    )
+    state = scheduler.create_stream_state("request")
+    state.code_chunks.append(torch.ones((2, 2), dtype=torch.long))
+    state.total_frames = 2
+    plan = scheduler._build_decode_plan(state, is_final=True)
+    assert plan is not None
+
+    events: list[str] = []
+
+    class DecodeStream:
+        def wait_stream(self, stream):
+            events.append("wait")
+
+        def synchronize(self):
+            events.append("stream_synchronize")
+
+    class StreamContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakeEvent:
+        def record(self, stream):
+            events.append("record")
+
+        def synchronize(self):
+            events.append("event_synchronize")
+
+    class HostBuffer:
+        def __init__(self, dtype):
+            self.storage = torch.zeros(64, dtype=dtype)
+
+        def take(self, numel):
+            return self.storage[:numel]
+
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device: object())
+    monkeypatch.setattr(torch.cuda, "stream", lambda stream: StreamContext())
+    monkeypatch.setattr(torch.cuda, "Event", FakeEvent)
+    scheduler._pinned_staging_disabled = False
+    staging = scheduler._thread_decode_staging()
+    staging.input_codes = HostBuffer(torch.long)
+    staging.output_audio = HostBuffer(torch.float32)
+
+    handle = scheduler._launch_decode_plans([plan], stream=DecodeStream())
+
+    assert events == ["wait", "record"], events
+    assert (
+        handle.decoder_input_keepalive is not None
+    ), "handle must keep the decode input alive until resolve"
+
+    deltas = handle.resolve()
+    assert events[-1] == "event_synchronize"
+    assert (
+        handle.decoder_input_keepalive is None
+    ), "resolve must release the decode input reference"
+    expected = torch.ones(2 * 4, dtype=torch.float32)
+    assert torch.equal(deltas[0], expected)
+    assert handle.resolve()[0] is deltas[0], "resolve must be idempotent"
+    staging.output_audio.storage.zero_()
+    assert torch.equal(deltas[0], expected), "resolved deltas must not alias staging"
+
+
+def test_qwen3_tts_decode_launch_syncs_when_event_record_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Event-record failure synchronizes queued decode work before unwinding."""
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+    )
+    state = scheduler.create_stream_state("request")
+    state.code_chunks.append(torch.ones((2, 2), dtype=torch.long))
+    state.total_frames = 2
+    plan = scheduler._build_decode_plan(state, is_final=True)
+    assert plan is not None
+
+    events: list[str] = []
+
+    class DecodeStream:
+        def wait_stream(self, stream):
+            events.append("wait")
+
+        def synchronize(self):
+            events.append("stream_synchronize")
+
+    class StreamContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    class ExplodingEvent:
+        def record(self, stream):
+            raise RuntimeError("event init failed")
+
+    class HostBuffer:
+        def __init__(self, dtype):
+            self.storage = torch.zeros(64, dtype=dtype)
+
+        def take(self, numel):
+            return self.storage[:numel]
+
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device: object())
+    monkeypatch.setattr(torch.cuda, "stream", lambda stream: StreamContext())
+    monkeypatch.setattr(torch.cuda, "Event", ExplodingEvent)
+    scheduler._pinned_staging_disabled = False
+    staging = scheduler._thread_decode_staging()
+    staging.input_codes = HostBuffer(torch.long)
+    staging.output_audio = HostBuffer(torch.float32)
+
+    with pytest.raises(RuntimeError, match="event init failed"):
+        scheduler._launch_decode_plans([plan], stream=DecodeStream())
+
+    assert (
+        "stream_synchronize" in events
+    ), "failed record must synchronize the decode stream"
+
+
+def test_qwen3_tts_short_request_final_flush_decodes_synchronously() -> None:
+    """A request that ends before the initial threshold flushes in stream-done."""
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        _FakeQwen3TTSTokenizer(),
+        device="cpu",
+        async_decode=True,
+    )
+    payload = make_payload(inputs="short", params={"stream": True})
+    scheduler._on_streaming_new_request(payload.request_id, payload)
+    scheduler._on_chunk(
+        payload.request_id,
+        _qwen3_tts_stream_item(
+            torch.ones((2, 2), dtype=torch.long),
+            chunk_id=0,
+            ref_code_len=0,
+        ),
+    )
+    assert scheduler.outbox.qsize() == 0, "below the threshold nothing is scheduled"
+
+    scheduler._handle_stream_done(payload.request_id)
+
+    chunk = scheduler.outbox.get_nowait()
+    assert chunk.type == "stream"
+    assert len(chunk.data["audio_waveform"]) == 2 * 4 * 4
+    assert scheduler.outbox.get_nowait().type == "result"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_qwen3_tts_handle_retains_exact_decode_input_until_resolve() -> None:
+    """The handle keeps the decoder's exact input alive until resolve()."""
+    import gc
+    import weakref
+
+    class SlowEchoDecoder:
+        # Reuse output storage to avoid allocation after delayed CUDA work
+        # begins.
+        total_upsample = 1
+
+        def __init__(self) -> None:
+            self.seen = None
+            self.out = torch.empty((1, 1, 256), dtype=torch.float32, device="cuda")
+
+        def chunked_decode(self, codes: torch.Tensor) -> torch.Tensor:
+            torch.cuda._sleep(300_000_000)
+            self.seen = weakref.ref(codes)
+            self.out.copy_(codes[:, :1])
+            return self.out
+
+    tokenizer = _FakeQwen3TTSTokenizer()
+    decoder = SlowEchoDecoder()
+    tokenizer.model.decoder = decoder
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        tokenizer,
+        device="cuda",
+        initial_cuda_graph=False,
+    )
+    codes = torch.randint(0, 2048, (256, 2), dtype=torch.long, device="cuda")
+    state = scheduler.create_stream_state("request")
+    state.num_quantizers = 2
+    scheduler.ingest("request", state, codes)
+    plan = scheduler._build_decode_plan(state, is_final=True)
+    assert plan is not None
+    expected = plan.decoder_input[0, 0].to(torch.float32).cpu().clone()
+    # Allocate buffers before launch so allocator synchronization cannot
+    # affect the in-flight assertions.
+    with torch.cuda.stream(scheduler._decode_stream):
+        warm = torch.empty(1024, device="cuda")
+    del warm
+    staging = scheduler._thread_decode_staging()
+    staging.input_codes.take(4096)
+    staging.output_audio.take(4096)
+    torch.cuda.synchronize()
+
+    handle = scheduler._launch_decode_plans([plan], stream=scheduler._decode_stream)
+
+    assert handle.event is not None
+    assert not handle.event.query(), "decode should still be in flight"
+    assert handle.decoder_input_keepalive is not None
+    assert decoder.seen is not None
+    assert (
+        decoder.seen() is handle.decoder_input_keepalive
+    ), "the handle must retain the exact tensor consumed by the decoder"
+    del plan
+    state.code_chunks.clear()
+
+    deltas = handle.resolve()
+    assert handle.event is None and handle.decoder_input_keepalive is None
+    assert torch.equal(deltas[0], expected)
+    del codes
+    gc.collect()
+    assert decoder.seen() is None, "resolve must release the decode input reference"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_qwen3_tts_pageable_fallback_synchronizes_stream_for_empty_delta_on_cuda() -> (
+    None
+):
+    """The pageable fallback waits for delayed CUDA work when the delta is empty."""
+    done_event = torch.cuda.Event()
+
+    class SleepyShortDecoder:
+        # Reuse output storage to avoid allocation after delayed CUDA work
+        # begins.
+        total_upsample = 4
+
+        def __init__(self) -> None:
+            self.out = torch.zeros((1, 1, 8), dtype=torch.float32, device="cuda")
+
+        def chunked_decode(self, codes: torch.Tensor) -> torch.Tensor:
+            torch.cuda._sleep(300_000_000)
+            done_event.record()
+            return self.out
+
+    tokenizer = _FakeQwen3TTSTokenizer()
+    tokenizer.model.decoder = SleepyShortDecoder()
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        tokenizer,
+        device="cuda",
+        initial_cuda_graph=False,
+    )
+    scheduler._pinned_staging_disabled = True
+    state = scheduler.create_stream_state("request")
+    state.num_quantizers = 2
+    state.code_chunks.append(torch.ones((5, 2), dtype=torch.long))
+    state.total_frames = 5
+    state.emitted_generated_frames = 4
+    plan = scheduler._build_decode_plan(state, is_final=True)
+    assert plan is not None
+    # Prime the allocator before starting delayed work.
+    warm = torch.empty(1024, device="cuda")
+    del warm
+    torch.cuda.synchronize()
+
+    handle = scheduler._launch_decode_plans([plan], stream=scheduler._decode_stream)
+
+    assert handle.event is None
+    assert done_event.query(), "fallback launch must wait for the decode stream"
+    assert handle.resolve()[0].numel() == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_qwen3_tts_decode_input_stays_correct_under_allocator_pressure() -> None:
+    """Caller-stream allocation pressure must not change an in-flight decode input."""
+
+    class SlowEchoDecoder:
+        total_upsample = 1
+
+        def chunked_decode(self, codes: torch.Tensor) -> torch.Tensor:
+            torch.cuda._sleep(200_000_000)
+            return codes[:, :1].to(torch.float32)
+
+    tokenizer = _FakeQwen3TTSTokenizer()
+    tokenizer.model.decoder = SlowEchoDecoder()
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        tokenizer,
+        device="cuda",
+        initial_cuda_graph=False,
+    )
+    frames = 4096
+    codes = torch.randint(0, 2048, (frames, 2), dtype=torch.long, device="cuda")
+    state = scheduler.create_stream_state("request")
+    state.num_quantizers = 2
+    scheduler.ingest("request", state, codes)
+    plan = scheduler._build_decode_plan(state, is_final=True)
+    assert plan is not None
+    expected = plan.decoder_input[0, 0].to(torch.float32).cpu().clone()
+
+    handle = scheduler._launch_decode_plans([plan], stream=scheduler._decode_stream)
+    del plan
+    state.code_chunks.clear()
+    assert handle.event is not None
+    assert not handle.event.query(), "decode should still be in flight"
+    # Apply allocation pressure; this does not guarantee reuse of the input
+    # block. Retaining the tensors forces fresh blocks instead of recycling
+    # one spare.
+    pressure = [
+        torch.full((2, frames), 2047, dtype=torch.long, device="cuda")
+        for _ in range(64)
+    ]
+    delta = handle.resolve()[0]
+    del pressure
+    assert torch.equal(delta, expected)
 
 
 def test_qwen3_tts_streaming_vocoder_decodes_initial_chunk_early() -> None:
@@ -2226,7 +2595,7 @@ def test_qwen3_tts_async_worker_propagates_process_exit(
         del args, kwargs
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(scheduler, "_run_decode_plans", interrupt)
+    monkeypatch.setattr(scheduler, "_launch_decode_plans", interrupt)
 
     with pytest.raises(KeyboardInterrupt):
         if worker == "initial":
@@ -4036,12 +4405,13 @@ def test_qwen3_tts_decode_isolates_rows_with_out_of_range_codes(
             absolute_emitted_frames=0,
             generated_frames=1,
             window_start=0,
+            emitted_generated_frames=0,
         )
 
     with pytest.raises(ValueError) as excinfo:
-        scheduler._run_decode_plans([_plan(7), _plan(2150)], stream=None)
+        scheduler._launch_decode_plans([_plan(7), _plan(2150)], stream=None)
     assert excinfo.value.indices == (1,)
     assert seen == [], "decoder must not run while a row is out of range"
 
-    scheduler._run_decode_plans([_plan(7), _plan(8)], stream=None)
+    scheduler._launch_decode_plans([_plan(7), _plan(8)], stream=None).resolve()
     assert [int(item.max()) for item in seen] == ([7, 8] if deterministic else [8])

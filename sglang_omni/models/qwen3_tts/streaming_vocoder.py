@@ -569,15 +569,15 @@ class Qwen3TTSStreamingVocoderScheduler(
         )
 
     def _screen_out_of_range_codes(self, decoder_input: torch.Tensor) -> Any:
-        # Note: (jiannan-17) out-of-range codes can cause a CUDA device-side
-        # assert. Clamp them before CUDA decode and keep one invalid-row flag
-        # per row.
-        #
-        # Flag check (2 paths):
-        #   1. async CUDA path -> after ``resolve()``
-        #   2. CPU or deterministic multi-plan paths -> before decode
-        #
-        # Invalid rows are rejected before audio output.
+        # Note (Jiaxin Deng): an out-of-range id makes the codec embedding lookup
+        # raise a device-side assert, which poisons the CUDA context and kills
+        # every in-flight stream in this process; validate_chunk cannot catch it
+        # because it skips device tensors. Clamp into range so the lookup is
+        # always safe, and return the per-row verdict: the CPU and deterministic
+        # multi-plan paths check it before decoding, the async CUDA path reads it
+        # back after ``resolve()`` has waited on the completion event, so no
+        # added synchronization buys the same protection. Rows that needed
+        # clamping are failed, never emitted.
         bad_rows = (
             ((decoder_input < 0) | (decoder_input >= _QWEN3_TTS_CODEBOOK_SIZE))
             .flatten(start_dim=1)
@@ -615,7 +615,7 @@ class Qwen3TTSStreamingVocoderScheduler(
             deterministic multi-plan mode -> resolve each plan before returning
         """
         if self._deterministic_inference and len(plans) > 1:
-            # Note: (jiannan-17) in deterministic mode, decode each plan at
+            # Note (jiannan-17): in deterministic mode, decode each plan at
             # B=1 so its output does not depend on the other requests in the
             # batch (#1475). Validate the combined batch before the per-plan
             # loop so bad-row indices still refer to the original group.
@@ -667,7 +667,7 @@ class Qwen3TTSStreamingVocoderScheduler(
                     staged = self._stage_deltas(deltas, staging)
                     if staged is None:
                         deltas = [delta.contiguous().cpu() for delta in deltas]
-                        # Note: (jiannan-17) a zero-element .cpu() call
+                        # Note (jiannan-17): a zero-element .cpu() call
                         # enqueues no D2H copy, so it does not wait for earlier
                         # decode work. Synchronize before returning.
                         stream.synchronize()
@@ -682,7 +682,7 @@ class Qwen3TTSStreamingVocoderScheduler(
                         deltas, bad_rows, event, decoder_input
                     )
             except BaseException:
-                # Note: (jiannan-17) CUDA work may already be using
+                # Note (jiannan-17): CUDA work may already be using
                 # decoder_input or the thread-local staging buffers.
                 # Synchronize before unwinding so their storage cannot be
                 # reused. Keep event.record() inside this try because its
@@ -1152,7 +1152,7 @@ class Qwen3TTSStreamingVocoderScheduler(
                 if not state.initial_pending:
                     self._schedule_followup(request_id, state)
                 return
-        # Note: (jiannan-17) requests that finish before the initial decode
+        # Note (jiannan-17): requests that finish before the initial decode
         # threshold flush synchronously below, so that decode and its resolve
         # run under _state_lock. Kept as-is here; moving short finals onto the
         # initial worker is a separate change.

@@ -625,6 +625,10 @@ that happened to contain an older version of the test.
   - request mapping for `ref_audio` / `ref_text` and `references`
   - incremental codec-to-vocoder ordering, priority batching, fallback parity,
     CUDA stream handoff, and abort/failure cleanup
+  - streaming vocoder decode slots: per-thread pinned staging with one reused
+    completion event, bad rows raised from `resolve()`, pageable fallback after
+    pinned allocation failure, and slot retirement or process-lifetime
+    retention when a launch or event wait fails (with a real CUDA reuse case)
   - model-owned default preservation for language and sampling parameters
   - Base, CustomVoice, and VoiceDesign request validation
   - voice-clone reference validation

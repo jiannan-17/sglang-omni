@@ -1924,6 +1924,7 @@ def test_qwen3_tts_short_request_final_flush_decodes_synchronously() -> None:
     assert scheduler.outbox.get_nowait().type == "result"
 
 
+@pytest.mark.accelerator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_qwen3_tts_handle_retains_exact_decode_input_until_resolve() -> None:
     """The handle keeps the decoder's exact input alive until resolve()."""
@@ -1989,6 +1990,7 @@ def test_qwen3_tts_handle_retains_exact_decode_input_until_resolve() -> None:
     assert decoder.seen() is None, "resolve must release the decode input reference"
 
 
+@pytest.mark.accelerator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_qwen3_tts_pageable_fallback_synchronizes_stream_for_empty_delta_on_cuda() -> (
     None
@@ -2036,6 +2038,7 @@ def test_qwen3_tts_pageable_fallback_synchronizes_stream_for_empty_delta_on_cuda
     assert handle.resolve()[0].numel() == 0
 
 
+@pytest.mark.accelerator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_qwen3_tts_decode_input_stays_correct_under_allocator_pressure() -> None:
     """Caller-stream allocation pressure must not change an in-flight decode input."""
@@ -2331,6 +2334,7 @@ def test_qwen3_tts_unproven_completion_retains_resources_and_disables_cuda_decod
         scheduler._launch_decode_plans([plan], stream=stream)
 
 
+@pytest.mark.accelerator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_qwen3_tts_decode_slot_reuses_event_on_cuda(
     monkeypatch: pytest.MonkeyPatch,

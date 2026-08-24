@@ -656,7 +656,7 @@ class Qwen3TTSStreamingVocoderScheduler(
         absolute_emitted = state.ref_frames + state.emitted_generated_frames
         window_start = max(0, absolute_emitted - self._stream_left_context_frames)
         window_end = state.ref_frames + generated_frames
-        # Note: (Jiaxin Deng) window_start only moves forward, so frames behind
+        # Note (Jiaxin Deng): window_start only moves forward, so frames behind
         # it are dead; prune whole chunks to keep this cat O(window), not
         # O(stream) per decode. Slices below translate by the pruned offset.
         while (

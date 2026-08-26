@@ -5,8 +5,9 @@ Streaming decoders copy device results into pinned host memory asynchronously
 and wait on a CUDA event before reading them back. The two classes here hold
 just the buffer and the event and carry no ownership policy: the owner
 serializes access, grows a buffer only while no asynchronous copy can still be
-using it, and must not touch a slot between ``record()`` and a successful
-``synchronize()``.
+using it, and must not touch a slot between ``record()`` and observed
+completion (a successful ``synchronize()``, or a ``query()`` that reported
+True).
 """
 
 from __future__ import annotations
@@ -78,10 +79,12 @@ class PinnedTransferSlot:
 
     The event is a completion fence for everything enqueued on the recording
     stream before ``record()``, so it also covers work that does not target
-    this buffer. Between ``record()`` and a successful ``synchronize()`` the
-    owner must not grow, re-record, or reuse the buffer. There is no pool,
-    lock, or failure policy here: after a failed ``record()`` or
-    ``synchronize()`` the owner decides whether the slot can be trusted again.
+    this buffer. Between ``record()`` and observed completion — a
+    ``synchronize()`` that returned, or a ``query()`` that reported True —
+    the owner must not grow, re-record, or reuse the buffer. There is no
+    pool, lock, or failure policy here: after a failed ``record()``,
+    ``query()``, or ``synchronize()`` the owner decides whether the slot can
+    be trusted again.
     """
 
     def __init__(
@@ -129,6 +132,13 @@ class PinnedTransferSlot:
             if self._event is None:
                 self._event = torch.cuda.Event()
             self._event.record(stream)
+
+    def query(self) -> bool:
+        """Return whether the recorded event has completed, without blocking."""
+        if self._event is None:
+            raise RuntimeError("transfer event was not recorded")
+        with self._device_guard():
+            return bool(self._event.query())
 
     def synchronize(self) -> None:
         """Block until the recorded event has completed."""

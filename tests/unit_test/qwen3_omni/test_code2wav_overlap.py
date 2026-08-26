@@ -27,6 +27,8 @@ from sglang_omni.models.qwen3_omni.components.code2wav_scheduler import (
 )
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.scheduling.messages import IncomingMessage
+from sglang_omni.utils import cuda_staging
+from sglang_omni.utils.cuda_staging import PinnedTransferSlot
 from tests.unit_test.fixtures.qwen_fakes import FakeCode2WavModel, make_qwen_payload
 
 
@@ -42,7 +44,7 @@ class _FakeEvent:
         self.query_calls = 0
         self.record_calls = 0
 
-    def record(self) -> None:
+    def record(self, stream=None) -> None:
         self.record_calls += 1
         if self.record_error is not None:
             raise self.record_error
@@ -58,6 +60,12 @@ class _FakeEvent:
         if self.sync_error is not None:
             raise self.sync_error
         self.complete = True
+
+
+def _slot_event(slot: PinnedTransferSlot) -> _FakeEvent:
+    """The slot's lazily created completion event — a _FakeEvent once
+    _force_pipeline ran; tests drive completion and failures through it."""
+    return slot._event
 
 
 class _DeviceFakeModel(FakeCode2WavModel):
@@ -115,11 +123,12 @@ def _force_pipeline(scheduler: Code2WavScheduler, monkeypatch) -> None:
     """Enable the CUDA-only pipeline branch on a CPU scheduler."""
     scheduler._pipeline_active = True
     monkeypatch.setattr(
-        scheduler,
-        "_alloc_pinned",
-        lambda samples: torch.empty(samples, dtype=torch.float32),
+        cuda_staging,
+        "_allocate_pinned",
+        lambda numel, dtype: torch.empty(numel, dtype=dtype),
     )
     monkeypatch.setattr(torch.cuda, "Event", _FakeEvent)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: None)
 
 
 def _seed(scheduler: Code2WavScheduler, request_id: str = "req-1") -> None:
@@ -263,7 +272,7 @@ def test_overlap_flush_failure_keeps_pending_owned_until_abort(monkeypatch) -> N
     state = scheduler._stream_states["req-1"]
     pending = state.pending
     assert pending is not None
-    event = pending.slot.event
+    event = _slot_event(pending.slot)
     event.complete = False
     event.sync_error = RuntimeError("D2H synchronization failed")
 
@@ -289,7 +298,7 @@ def test_overlap_abort_retires_inflight_slot_without_synchronizing(monkeypatch) 
     state = scheduler._stream_states["req-1"]
     pending = state.pending
     assert pending is not None
-    event = pending.slot.event
+    event = _slot_event(pending.slot)
     event.complete = False
     event.sync_error = AssertionError("abort must not synchronize")
 
@@ -309,11 +318,11 @@ def test_overlap_acquire_reaps_completed_retired_slot(monkeypatch) -> None:
     pending = scheduler._stream_states["req-1"].pending
     assert pending is not None
     slot = pending.slot
-    slot.event.complete = False
+    _slot_event(slot).complete = False
     scheduler.abort("req-1")
 
-    slot.event.complete = True
-    acquired = scheduler._acquire_slot(slot.buffer.numel())
+    _slot_event(slot).complete = True
+    acquired = scheduler._acquire_slot(slot.capacity)
 
     assert acquired is slot
     assert scheduler._pinned_retired == []
@@ -329,7 +338,7 @@ def test_overlap_query_failure_quarantines_slot(monkeypatch, caplog) -> None:
     pending = scheduler._stream_states["req-1"].pending
     assert pending is not None
     slot = pending.slot
-    slot.event.query_error = RuntimeError("event query failed")
+    _slot_event(slot).query_error = RuntimeError("event query failed")
     scheduler.abort("req-1")
 
     scheduler._reap_retired_slots()
@@ -350,8 +359,8 @@ def test_overlap_previous_flush_failure_keeps_both_slots_owned(monkeypatch) -> N
     state = scheduler._stream_states["req-1"]
     previous = state.pending
     assert previous is not None
-    previous.slot.event.complete = False
-    previous.slot.event.sync_error = RuntimeError("previous flush failed")
+    _slot_event(previous.slot).complete = False
+    _slot_event(previous.slot).sync_error = RuntimeError("previous flush failed")
 
     with pytest.raises(RuntimeError, match="previous flush failed"):
         _feed(scheduler, "req-1", range(20, 30))
@@ -360,7 +369,7 @@ def test_overlap_previous_flush_failure_keeps_both_slots_owned(monkeypatch) -> N
     assert len(scheduler._pinned_retired) == 1
     current_slot = scheduler._pinned_retired[0]
     assert current_slot is not previous.slot
-    assert current_slot.event.record_calls == 1
+    assert _slot_event(current_slot).record_calls == 1
 
     scheduler.abort("req-1")
     assert previous.slot in scheduler._pinned_retired
@@ -380,8 +389,11 @@ def test_overlap_record_failure_quarantines_current_slot(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="event record failed"):
         _feed(scheduler, "req-1", range(10, 20))
 
+    # Note (jiannan-17): the failing event was recorded exactly once and the
+    # only slot in existence went to quarantine, so the identity link holds
+    # without reaching into the slot's lazily created event.
+    assert event.record_calls == 1
     assert len(scheduler._pinned_quarantined) == 1
-    assert scheduler._pinned_quarantined[0].event is event
     assert scheduler._pinned_free == []
     assert scheduler._pipeline_active is False
 
@@ -393,13 +405,13 @@ def test_overlap_slot_growth_failure_returns_original_free_slot(monkeypatch) -> 
     assert slot is not None
     scheduler._release_slot(slot)
 
-    def _fail_alloc(samples: int) -> torch.Tensor:
-        raise RuntimeError(f"cannot grow to {samples}")
+    def _fail_alloc(numel: int, dtype: torch.dtype) -> torch.Tensor:
+        raise RuntimeError(f"cannot grow to {numel}")
 
-    monkeypatch.setattr(scheduler, "_alloc_pinned", _fail_alloc)
+    monkeypatch.setattr(cuda_staging, "_allocate_pinned", _fail_alloc)
 
     with pytest.raises(RuntimeError, match="cannot grow"):
-        scheduler._acquire_slot(slot.buffer.numel() + 1)
+        scheduler._acquire_slot(slot.capacity + 1)
 
     assert scheduler._pinned_free == [slot]
     assert scheduler._pinned_created == 1
@@ -413,12 +425,12 @@ def test_overlap_flush_synchronizes_before_releasing_slot(monkeypatch) -> None:
 
     pending = scheduler._stream_states["req-1"].pending
     assert pending is not None
-    event = pending.slot.event
+    event = _slot_event(pending.slot)
 
     release_slot = scheduler._release_slot
 
     def _release_after_synchronize(slot) -> None:
-        assert slot.event.synchronize_calls == 1
+        assert _slot_event(slot).synchronize_calls == 1
         release_slot(slot)
 
     monkeypatch.setattr(scheduler, "_release_slot", _release_after_synchronize)
@@ -493,7 +505,7 @@ def test_overlap_replay_failure_with_pending_aborts_and_releases(monkeypatch) ->
     assert [message.type for message in messages] == ["stream", "stream", "error"]
     assert scheduler._pinned_retired == []
     assert len(scheduler._pinned_free) == 1
-    assert scheduler._pinned_free[0].event.query_calls >= 1
+    assert _slot_event(scheduler._pinned_free[0]).query_calls >= 1
 
 
 def test_overlap_pool_exhaustion_falls_back_sync_per_window(monkeypatch) -> None:

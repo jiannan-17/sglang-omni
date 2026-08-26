@@ -23,13 +23,20 @@ class _FakeEvent:
     def __init__(self) -> None:
         self.recorded_streams: list = []
         self.synchronize_calls = 0
+        self.complete = True
         self.record_error: BaseException | None = None
         self.sync_error: BaseException | None = None
+        self.query_error: BaseException | None = None
 
     def record(self, stream=None) -> None:
         if self.record_error is not None:
             raise self.record_error
         self.recorded_streams.append(stream)
+
+    def query(self) -> bool:
+        if self.query_error is not None:
+            raise self.query_error
+        return self.complete
 
     def synchronize(self) -> None:
         self.synchronize_calls += 1
@@ -139,6 +146,28 @@ def test_pinned_transfer_slot_reuses_one_event(monkeypatch):
     assert slot.view(16).numel() == 16
 
 
+def test_pinned_transfer_slot_query_probes_completion_without_blocking(monkeypatch):
+    created = _install_fake_events(monkeypatch)
+    _install_fake_pinned_alloc(monkeypatch)
+
+    slot = PinnedTransferSlot("cpu", torch.float32)
+    with pytest.raises(RuntimeError, match="not recorded"):
+        slot.query()
+
+    slot.record(object())
+    created[0].complete = False
+    assert slot.query() is False
+    created[0].complete = True
+    assert slot.query() is True
+    assert created[0].synchronize_calls == 0, "query must not block on the event"
+
+    query_error = RuntimeError("query failed")
+    created[0].query_error = query_error
+    with pytest.raises(RuntimeError) as query_info:
+        slot.query()
+    assert query_info.value is query_error
+
+
 def test_pinned_transfer_slot_propagates_errors_and_rejects_foreign_stream(
     monkeypatch,
 ):
@@ -177,6 +206,7 @@ def test_pinned_transfer_slot_propagates_errors_and_rejects_foreign_stream(
         cuda_slot.record(SimpleNamespace(device=torch.device("cuda", 1)))
     assert len(created) == 1, "a rejected stream must not create an event"
     cuda_slot.record(SimpleNamespace(device=torch.device("cuda:0")))
+    cuda_slot.query()
     cuda_slot.synchronize()
     assert len(created) == 2
-    assert guards == [torch.device("cuda", 0)] * 2
+    assert guards == [torch.device("cuda", 0)] * 3

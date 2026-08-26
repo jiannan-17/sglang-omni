@@ -389,11 +389,14 @@ def test_overlap_record_failure_quarantines_current_slot(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="event record failed"):
         _feed(scheduler, "req-1", range(10, 20))
 
-    # Note (jiannan-17): the failing event was recorded exactly once and the
-    # only slot in existence went to quarantine, so the identity link holds
-    # without reaching into the slot's lazily created event.
+    # Note (jiannan-17): only one slot was ever created and it sits in
+    # quarantine with every other pool empty, so the quarantined slot is
+    # necessarily the one whose record failed — no need to reach into the
+    # slot's lazily created event.
     assert event.record_calls == 1
+    assert scheduler._pinned_created == 1
     assert len(scheduler._pinned_quarantined) == 1
+    assert scheduler._pinned_retired == []
     assert scheduler._pinned_free == []
     assert scheduler._pipeline_active is False
 

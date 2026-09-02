@@ -108,10 +108,8 @@ def load_code2wav_model(
 class _PendingWindow:
     """Depth-2 pipeline slot reference held by a stream state.
 
-    The slot's pinned buffer only grows and its completion event is reused
-    across windows, so a steady-state stream never allocates. The sample
-    count is recorded at launch so the flush never has to read a shape back
-    from the device.
+    The sample count is recorded at launch so the flush never has to read a
+    shape back from the device.
     """
 
     slot: PinnedTransferSlot
@@ -190,6 +188,9 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self._eos_lazy_scan = self._enable_output_overlap and not self._enable_batching
         self._pipeline_active = self._eos_lazy_scan and self._device.type == "cuda"
         self._default_slot_samples = self._stream_chunk_size * self._total_upsample
+        # Note (wenyao): a slot's pinned buffer only grows and its completion
+        # event is reused across windows, so a steady-state stream never
+        # allocates.
         self._pinned_free: list[PinnedTransferSlot] = []
         self._pinned_created = 0
         # Note (wenyao): a slot must have exactly one owner at any time.
@@ -411,6 +412,10 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
                 # Note (wenyao): a failed copy or record leaves no trustworthy
                 # completion marker, so this buffer must never go back into
                 # rotation even though it was never handed to a request.
+                # Note (jiannan-17): the shared slot refuses query() and
+                # synchronize() only after a record() that raised; a copy
+                # that raised before record() still reads the previous
+                # transfer, so the quarantine is what keeps this buffer out.
                 self._quarantine_slot(slot)
             raise
         state.pending = _PendingWindow(slot=slot, samples=samples)

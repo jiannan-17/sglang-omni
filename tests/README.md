@@ -475,9 +475,13 @@ that happened to contain an older version of the test.
     and mono/channel preservation.
   - pinned CUDA staging primitives (`cuda_staging`): exact-size growth that
     keeps the old storage on allocation failure, allocation outside inference
-    mode, one reusable completion event per transfer slot, and record/sync
-    error propagation with same-device stream checks, using CPU stand-ins
-    where no GPU is present.
+    mode, one reusable completion event per transfer slot, the non-blocking
+    completion probe, record/query/sync error propagation with same-device
+    stream checks, and the failed-record contract (a slot whose first or
+    repeated `record()` raised refuses `query()`/`synchronize()` instead of
+    reporting the unrecorded event as complete), using CPU stand-ins where no
+    GPU is present; the `accelerator`-marked cases observe a real in-flight
+    D2H copy through `query()` and drive a slot on `cuda:1` from `cuda:0`.
 - `unit_test/model_runner/`: Shared model-runner contract tests:
   - arch override pool sizing: a sub-model engine's KV pool takes the
     sub-model's layer count through SGLang's layer resolver (the Qwen3-Omni
@@ -613,7 +617,15 @@ that happened to contain an older version of the test.
     identity against the synchronous path, first-window sync cadence,
     stream-done pending flush, lazy batched EOS scanning, pinned-slot pool
     lifecycle across abort/replay-failure/exhaustion, and profiler event
-    shape; the `accelerator`-marked case runs real pinned buffers and CUDA events
+    shape; the `accelerator`-marked cases run real pinned buffers and CUDA
+    events: byte identity with CUDA graphs on and off at the 20/30-frame
+    boundaries and the 21/31-frame tails (every threshold window replays its
+    graph key, only the stream-done tail runs eagerly, and window 3 replays
+    the key whose static output window 2's pending copy reads from), the
+    completion probe against an in-flight copy, mid-stream abort without
+    blocking or early slot reuse even after a same-key replay rewrote the
+    copy's source, and a scheduler on `cuda:1` warmed, probed, flushed,
+    reaped and drained from `cuda:0`
   - logit-shaping helpers (e.g. repetition penalty) numerical equivalence with the original per-row scalar formulas.
   - Thinker prefill contracts: `OmniPrefillInputs` adoption for text and
     audio-input → text-output prefills, whole-batch fail-closed qualification,
@@ -826,5 +838,7 @@ that happened to contain an older version of the test.
   installer rollback, interrupted-run recovery, and lock serialization. No
   accelerator is required.
 
-- `unit_test/fixtures/`: Shared fakes. Single-test
-  helpers should stay local until a second test needs them.
+- `unit_test/fixtures/`: Shared fakes, plus the runtime accelerator probe
+  (`accelerator.py`, `require_cuda(min_devices)`) that `accelerator`-marked
+  tests call in the test body. Single-test helpers should stay local until a
+  second test needs them.

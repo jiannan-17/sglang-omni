@@ -28,9 +28,8 @@ class _FakeEvent:
         self.recorded_streams: list = []
         self.synchronize_calls = 0
         self.query_calls = 0
-        # Note (jiannan-17): CUDA reports an event that was never recorded as
-        # complete, so the stand-in starts complete as well; the slot must
-        # not let that state through before a record() has succeeded.
+        # Note (jiannan-17): CUDA reports an unrecorded event as complete; the
+        # stand-in matches.
         self.complete = True
         self.record_error: BaseException | None = None
         self.sync_error: BaseException | None = None
@@ -179,9 +178,7 @@ def test_pinned_transfer_slot_query_probes_completion_without_blocking(monkeypat
     with pytest.raises(RuntimeError) as query_info:
         slot.query()
     assert query_info.value is query_error
-    # Note (jiannan-17): a failed probe says nothing about the record; the
-    # owner decides whether to trust the slot, and a retry still reaches the
-    # event instead of the "not recorded" guard.
+    # A failed probe leaves the record in place (owner policy).
     created[0].query_error = None
     assert slot.query() is True
 
@@ -189,12 +186,7 @@ def test_pinned_transfer_slot_query_probes_completion_without_blocking(monkeypat
 def test_pinned_transfer_slot_first_record_failure_rejects_completion_reads(
     monkeypatch,
 ):
-    """A slot whose only ``record()`` raised has no transfer to report on.
-
-    The event object exists (it is created before the record is attempted)
-    and CUDA would report it complete, so without the record-succeeded state
-    the owner could read a completion marker for a copy that was never fenced.
-    """
+    """A slot whose only ``record()`` raised has no transfer to report on."""
     record_error = RuntimeError("event record failed")
 
     def _fail_record(event: _FakeEvent) -> None:
@@ -208,19 +200,15 @@ def test_pinned_transfer_slot_first_record_failure_rejects_completion_reads(
         slot.record(object())
     assert record_info.value is record_error
     assert len(created) == 1
-    assert created[0].complete is True, "the stand-in mirrors CUDA's unrecorded state"
+    assert created[0].complete is True
 
+    # The slot must not treat the failed transfer as complete.
     with pytest.raises(RuntimeError, match="not recorded"):
         slot.query()
     with pytest.raises(RuntimeError, match="not recorded"):
         slot.synchronize()
-    assert (created[0].query_calls, created[0].synchronize_calls) == (
-        0,
-        0,
-    ), "the guard fires before the event is consulted"
+    assert (created[0].query_calls, created[0].synchronize_calls) == (0, 0)
 
-    # A later successful record() makes the slot usable again with the same
-    # event; no second event is created.
     created[0].record_error = None
     stream = object()
     slot.record(stream)
@@ -234,8 +222,7 @@ def test_pinned_transfer_slot_first_record_failure_rejects_completion_reads(
 def test_pinned_transfer_slot_event_construction_failure_rejects_completion_reads(
     monkeypatch,
 ):
-    """When ``torch.cuda.Event()`` itself raises, no event exists and the slot
-    still has no recorded transfer; the retry creates the event."""
+    """A failed ``torch.cuda.Event()`` leaves no event; the retry creates it."""
     created = _install_fake_events(monkeypatch)
     _install_fake_pinned_alloc(monkeypatch)
     slot = PinnedTransferSlot("cpu", torch.float32)
@@ -284,16 +271,14 @@ def test_pinned_transfer_slot_failed_rerecord_hides_previous_completion(
         slot.record(object())
     assert record_info.value is record_error
     assert created[0].recorded_streams == [first_stream]
-    assert created[0].complete is True, "the previous transfer did complete"
+    assert created[0].complete is True
 
+    # The slot must not treat the failed transfer as complete.
     with pytest.raises(RuntimeError, match="not recorded"):
         slot.query()
     with pytest.raises(RuntimeError, match="not recorded"):
         slot.synchronize()
-    assert (created[0].query_calls, created[0].synchronize_calls) == (
-        1,
-        1,
-    ), "the guard must fire before the event"
+    assert (created[0].query_calls, created[0].synchronize_calls) == (1, 1)
 
     created[0].record_error = None
     second_stream = object()
@@ -320,9 +305,7 @@ def test_pinned_transfer_slot_propagates_errors_and_rejects_foreign_stream(
     with pytest.raises(RuntimeError) as sync_info:
         slot.synchronize()
     assert sync_info.value is sync_error
-    # Note (jiannan-17): a failed wait leaves the record in place; whether the
-    # slot is still trustworthy is the owner's call, so a retry reaches the
-    # event again.
+    # A failed wait leaves the record in place (owner policy).
     created[0].sync_error = None
     slot.synchronize()
     assert created[0].synchronize_calls == 2
@@ -349,8 +332,7 @@ def test_pinned_transfer_slot_propagates_errors_and_rejects_foreign_stream(
     assert len(created) == 2
     assert guards == [torch.device("cuda", 0)] * 3
 
-    # A rejected re-record is a failed record: the completed first transfer
-    # must not answer for the one that never got fenced.
+    # A rejected stream is a failed record.
     with pytest.raises(ValueError):
         cuda_slot.record(SimpleNamespace(device=torch.device("cuda", 1)))
     with pytest.raises(RuntimeError, match="not recorded"):
@@ -358,9 +340,7 @@ def test_pinned_transfer_slot_propagates_errors_and_rejects_foreign_stream(
     with pytest.raises(RuntimeError, match="not recorded"):
         cuda_slot.synchronize()
     assert (created[1].query_calls, created[1].synchronize_calls) == (1, 1)
-    assert (
-        guards == [torch.device("cuda", 0)] * 3
-    ), "the guard is entered only for CUDA work"
+    assert guards == [torch.device("cuda", 0)] * 3
 
 
 @pytest.mark.accelerator
@@ -368,9 +348,8 @@ def test_pinned_transfer_slot_real_cuda_query_tracks_async_copy() -> None:
     """``query()`` is False while the fenced D2H copy is in flight, then True."""
     require_cuda()
     device = torch.device("cuda", torch.cuda.current_device())
-    # Note (jiannan-17): the premise behind the failed-record contract, checked
-    # against the driver rather than assumed: a torch event that was never
-    # recorded reports complete and synchronizes as a no-op.
+    # Note (jiannan-17): the contract's premise, checked against the driver:
+    # an unrecorded event reports complete.
     unrecorded = torch.cuda.Event()
     assert unrecorded.query() is True
     unrecorded.synchronize()
@@ -385,9 +364,8 @@ def test_pinned_transfer_slot_real_cuda_query_tracks_async_copy() -> None:
     stream = torch.cuda.Stream(device=device)
     torch.cuda.synchronize(device)
     with torch.cuda.stream(stream):
-        # Note (jiannan-17): the spin keeps the copy queued behind ~0.5 s of
-        # device work; nothing between here and the probe touches CUDA, so
-        # only a host stall of that order could let the copy drain first.
+        # Note (jiannan-17): ~0.5 s of queued device work keeps the copy in
+        # flight; nothing between here and the probe touches CUDA.
         torch.cuda._sleep(1_000_000_000)
         slot.view(numel).copy_(source, non_blocking=True)
     slot.record(stream)
@@ -426,8 +404,8 @@ def test_pinned_transfer_slot_real_cuda_guards_slot_on_other_device() -> None:
         with torch.cuda.stream(stream):
             torch.cuda._sleep(1_000_000_000)
             slot.view(numel).copy_(source, non_blocking=True)
-        # Note (jiannan-17): the stream context restores cuda:0; every slot
-        # call below therefore starts on the wrong device for its event.
+        # Note (jiannan-17): the stream context restores cuda:0, so every slot
+        # call below starts on the other device.
         assert torch.cuda.current_device() == 0
 
         slot.record(stream)

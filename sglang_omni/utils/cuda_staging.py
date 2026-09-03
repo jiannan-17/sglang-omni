@@ -77,21 +77,12 @@ class GrowablePinnedBuffer:
 class PinnedTransferSlot:
     """One growable pinned host buffer plus one reusable CUDA event.
 
-    The event is a completion fence for everything enqueued on the recording
-    stream before ``record()``, so it also covers work that does not target
-    this buffer. Between ``record()`` and observed completion — a
-    ``synchronize()`` that returned, or a ``query()`` that reported True —
-    the owner must not grow, re-record, or reuse the buffer. A ``record()``
-    that raises leaves no recorded transfer: ``query()`` and
-    ``synchronize()`` raise until a later ``record()`` succeeds, so the
-    completion state of an earlier transfer is never reported in place of
-    the one that failed to record. The slot only sees ``record()``: a copy
-    that raised, or was enqueued without a following ``record()``, leaves
-    the previous transfer's completion state readable, so keeping such a
-    buffer out of rotation is still the owner's job. There is no pool,
-    lock, or further failure policy here: after a failed ``record()``,
-    ``query()``, or ``synchronize()`` the owner decides whether the slot
-    can be trusted again.
+    The event fences work queued before ``record()``. Do not resize or reuse
+    the buffer until ``synchronize()`` returns or ``query()`` reports True.
+
+    If ``record()`` raises, completion reads fail until a later ``record()``
+    succeeds. Copy failures before ``record()`` remain the owner's
+    responsibility.
     """
 
     def __init__(

@@ -1,0 +1,1 @@
+sgl-omni serve --model-path /workspace/models/Qwen3-Omni-30B-A3B-Instruct --port 8008 --config examples/configs/qwen3_omni_colocated_h100_bf16.yaml --colocate --thinker.engine.disable_radix_cache true

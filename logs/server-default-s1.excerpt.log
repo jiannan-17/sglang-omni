@@ -1,0 +1,476 @@
+==================== Merged Configuration ====================
+model_path: /workspace/models/Qwen3-Omni-30B-A3B-Instruct
+audio_chunking:
+  max_audio_clip_s: 30.0
+  max_total_audio_s: 3600.0
+  max_concurrent_chunks: 8
+stages:
+  preprocessing:
+    factory_path: sglang_omni.models.qwen3_omni.stages.create_preprocessing_executor
+    next:
+    - image_encoder
+    - audio_encoder
+    - thinker
+    - talker_ar
+    terminal: false
+    route_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_preprocessing_next_stages_speech
+    gpu: null
+    tp_size: 1
+    process: preprocessing
+    gpu_memory_fraction: null
+    total_reserve_bytes: null
+    enforce_total_reserve: true
+    factory:
+      device: null
+      dtype: null
+      max_seq_len: 8192
+      video_fps: null
+      max_new_tokens: null
+      context_length: null
+      max_concurrency: null
+      max_batch_size: null
+      max_batch_wait_ms: null
+      enable_async_decode: null
+      async_decode_min_batch_size: null
+      prefill_coalesce_requests: null
+      prefill_coalesce_wait_ms: null
+      prefill_coalesce_when_idle: null
+      prefill_coalesce_requires_pending_builds: null
+      prefill_coalesce_after_builds_during_decode: null
+      request_build_max_workers: null
+      request_build_max_pending: null
+      encoder_mem_reserve: null
+      enable_partial_start: null
+      partial_start_min_chunks: null
+    env: {}
+    wait_for: null
+    wait_for_fn: null
+    merge_fn: null
+    stream_to: []
+    stream_done_to_fn: null
+    can_accept_stream_before_payload: false
+    disable_direct_cuda_ipc_payload: false
+    project_payload:
+      image_encoder: sglang_omni.models.qwen3_omni.request_builders.project_preprocessing_to_image_encoder
+      audio_encoder: sglang_omni.models.qwen3_omni.request_builders.project_preprocessing_to_audio_encoder
+      thinker: sglang_omni.models.qwen3_omni.request_builders.project_preprocessing_to_mm_aggregate
+      talker_ar: sglang_omni.models.qwen3_omni.request_builders.project_preprocessing_to_mm_aggregate
+    comm: null
+  image_encoder:
+    factory_path: sglang_omni.models.qwen3_omni.stages.create_image_encoder_executor
+    next:
+    - thinker
+    - talker_ar
+    terminal: false
+    route_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_encoder_next_stages
+    gpu: 0
+    tp_size: 1
+    process: image_encoder
+    gpu_memory_fraction: 0.02
+    total_reserve_bytes: null
+    enforce_total_reserve: true
+    factory:
+      device: null
+      dtype: null
+      max_seq_len: null
+      video_fps: null
+      max_new_tokens: null
+      context_length: null
+      max_concurrency: null
+      max_batch_size: null
+      max_batch_wait_ms: null
+      enable_async_decode: null
+      async_decode_min_batch_size: null
+      prefill_coalesce_requests: null
+      prefill_coalesce_wait_ms: null
+      prefill_coalesce_when_idle: null
+      prefill_coalesce_requires_pending_builds: null
+      prefill_coalesce_after_builds_during_decode: null
+      request_build_max_workers: null
+      request_build_max_pending: null
+      encoder_mem_reserve: null
+      enable_partial_start: null
+      partial_start_min_chunks: null
+    env: {}
+    wait_for: null
+    wait_for_fn: null
+    merge_fn: null
+    stream_to: []
+    stream_done_to_fn: null
+    can_accept_stream_before_payload: false
+    disable_direct_cuda_ipc_payload: false
+    project_payload:
+      thinker: sglang_omni.models.qwen3_omni.request_builders.project_encoder_to_mm_aggregate
+      talker_ar: sglang_omni.models.qwen3_omni.request_builders.project_encoder_to_talker_ar
+    comm: null
+  audio_encoder:
+    factory_path: sglang_omni.models.qwen3_omni.stages.create_audio_encoder_executor
+    next:
+    - thinker
+    - talker_ar
+    terminal: false
+    route_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_encoder_next_stages
+    gpu: 0
+    tp_size: 1
+    process: audio_encoder
+    gpu_memory_fraction: 0.02
+    total_reserve_bytes: null
+    enforce_total_reserve: true
+    factory:
+      device: null
+      dtype: null
+      max_seq_len: null
+      video_fps: null
+      max_new_tokens: null
+      context_length: null
+      max_concurrency: null
+      max_batch_size: null
+      max_batch_wait_ms: null
+      enable_async_decode: null
+      async_decode_min_batch_size: null
+      prefill_coalesce_requests: null
+      prefill_coalesce_wait_ms: null
+      prefill_coalesce_when_idle: null
+      prefill_coalesce_requires_pending_builds: null
+      prefill_coalesce_after_builds_during_decode: null
+      request_build_max_workers: null
+      request_build_max_pending: null
+      encoder_mem_reserve: null
+      enable_partial_start: null
+      partial_start_min_chunks: null
+      enable_layer_cuda_graph: true
+    env: {}
+    wait_for: null
+    wait_for_fn: null
+    merge_fn: null
+    stream_to: []
+    stream_done_to_fn: null
+    can_accept_stream_before_payload: false
+    disable_direct_cuda_ipc_payload: true
+    project_payload:
+      thinker: sglang_omni.models.qwen3_omni.request_builders.project_encoder_to_mm_aggregate
+      talker_ar: sglang_omni.models.qwen3_omni.request_builders.project_encoder_to_talker_ar
+    comm: null
+  thinker:
+    factory_path: sglang_omni.models.qwen3_omni.stages.create_sglang_thinker_executor_from_config
+    next: decode
+    terminal: false
+    route_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_thinker_next_stages
+    gpu: 0
+    tp_size: 1
+    process: thinker
+    gpu_memory_fraction: 0.78
+    total_reserve_bytes: null
+    enforce_total_reserve: true
+    engine:
+      mem_fraction_static: null
+      max_running_requests: null
+      max_total_tokens: null
+      cuda_graph_max_bs: null
+      disable_cuda_graph: null
+      enable_torch_compile: null
+      torch_compile_max_bs: null
+      cpu_offload_gb: null
+      quantization: null
+      disable_custom_all_reduce: null
+      kv_cache_bytes: null
+      cuda_graph_backend_prefill: breakable
+      cuda_graph_max_bs_prefill: 2048
+    factory:
+      device: null
+      dtype: null
+      max_seq_len: 8192
+      video_fps: null
+      max_new_tokens: null
+      context_length: null
+      max_concurrency: null
+      max_batch_size: null
+      max_batch_wait_ms: null
+      enable_async_decode: true
+      async_decode_min_batch_size: null
+      prefill_coalesce_requests: null
+      prefill_coalesce_wait_ms: null
+      prefill_coalesce_when_idle: null
+      prefill_coalesce_requires_pending_builds: null
+      prefill_coalesce_after_builds_during_decode: null
+      request_build_max_workers: null
+      request_build_max_pending: null
+      encoder_mem_reserve: null
+      enable_partial_start: null
+      partial_start_min_chunks: null
+      speech_enabled: true
+    env: {}
+    wait_for:
+    - preprocessing
+    - image_encoder
+    - audio_encoder
+    wait_for_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_mm_aggregate_wait_sources
+    merge_fn: sglang_omni.models.qwen3_omni.merge.merge_for_thinker
+    stream_to:
+    - talker_ar
+    - decode
+    stream_done_to_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_thinker_stream_done_targets
+    can_accept_stream_before_payload: false
+    disable_direct_cuda_ipc_payload: false
+    project_payload:
+      decode: sglang_omni.models.qwen3_omni.request_builders.project_thinker_to_decode
+    comm: null
+  decode:
+    factory_path: sglang_omni.models.qwen3_omni.stages.create_decode_executor
+    next: null
+    terminal: true
+    route_fn: null
+    gpu: null
+    tp_size: 1
+    process: decode
+    gpu_memory_fraction: null
+    total_reserve_bytes: null
+    enforce_total_reserve: true
+    factory:
+      device: null
+      dtype: null
+      max_seq_len: null
+      video_fps: null
+      max_new_tokens: null
+      context_length: null
+      max_concurrency: null
+      max_batch_size: null
+      max_batch_wait_ms: null
+      enable_async_decode: null
+      async_decode_min_batch_size: null
+      prefill_coalesce_requests: null
+      prefill_coalesce_wait_ms: null
+      prefill_coalesce_when_idle: null
+      prefill_coalesce_requires_pending_builds: null
+      prefill_coalesce_after_builds_during_decode: null
+      request_build_max_workers: null
+      request_build_max_pending: null
+      encoder_mem_reserve: null
+      enable_partial_start: null
+      partial_start_min_chunks: null
+    env: {}
+    wait_for: null
+    wait_for_fn: null
+    merge_fn: null
+    stream_to: []
+    stream_done_to_fn: null
+    can_accept_stream_before_payload: true
+    disable_direct_cuda_ipc_payload: false
+    project_payload: {}
+    comm: null
+  talker_ar:
+    factory_path: sglang_omni.models.qwen3_omni.stages.create_talker_ar_executor_from_config
+    next: code2wav
+    terminal: false
+    route_fn: null
+    gpu: 0
+    tp_size: 1
+    process: talker_ar
+    gpu_memory_fraction: 0.1
+    total_reserve_bytes: null
+    enforce_total_reserve: true
+    engine:
+      mem_fraction_static: null
+      max_running_requests: null
+      max_total_tokens: null
+      cuda_graph_max_bs: null
+      disable_cuda_graph: null
+      enable_torch_compile: null
+      torch_compile_max_bs: null
+      cpu_offload_gb: null
+      quantization: null
+      disable_custom_all_reduce: null
+      kv_cache_bytes: null
+    factory:
+      device: null
+      dtype: null
+      max_seq_len: 32768
+      video_fps: null
+      max_new_tokens: null
+      context_length: null
+      max_concurrency: null
+      max_batch_size: null
+      max_batch_wait_ms: null
+      enable_async_decode: null
+      async_decode_min_batch_size: null
+      prefill_coalesce_requests: null
+      prefill_coalesce_wait_ms: null
+      prefill_coalesce_when_idle: null
+      prefill_coalesce_requires_pending_builds: null
+      prefill_coalesce_after_builds_during_decode: null
+      request_build_max_workers: null
+      request_build_max_pending: null
+      encoder_mem_reserve: null
+      enable_partial_start: false
+      partial_start_min_chunks: 5
+    env: {}
+    wait_for:
+    - preprocessing
+    - image_encoder
+    - audio_encoder
+    wait_for_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_mm_aggregate_wait_sources
+    merge_fn: sglang_omni.models.qwen3_omni.request_builders.merge_for_talker
+    stream_to:
+    - code2wav
+    stream_done_to_fn: null
+    can_accept_stream_before_payload: true
+    disable_direct_cuda_ipc_payload: false
+    project_payload:
+      code2wav: sglang_omni.models.qwen3_omni.request_builders.project_talker_to_code2wav
+    comm: null
+  code2wav:
+    factory_path: sglang_omni.models.qwen3_omni.components.code2wav_scheduler.create_code2wav_scheduler
+    next: null
+    terminal: true
+    route_fn: null
+    gpu: 0
+    tp_size: 1
+    process: code2wav
+    gpu_memory_fraction: 0.02
+    total_reserve_bytes: null
+    enforce_total_reserve: true
+    factory:
+      device: null
+      dtype: null
+      max_seq_len: null
+      video_fps: null
+      max_new_tokens: null
+      context_length: null
+      max_concurrency: null
+      max_batch_size: null
+      max_batch_wait_ms: null
+      enable_async_decode: null
+      async_decode_min_batch_size: null
+      prefill_coalesce_requests: null
+      prefill_coalesce_wait_ms: null
+      prefill_coalesce_when_idle: null
+      prefill_coalesce_requires_pending_builds: null
+      prefill_coalesce_after_builds_during_decode: null
+      request_build_max_workers: null
+      request_build_max_pending: null
+      encoder_mem_reserve: null
+      enable_partial_start: null
+      partial_start_min_chunks: null
+    env: {}
+    wait_for: null
+    wait_for_fn: null
+    merge_fn: null
+    stream_to: []
+    stream_done_to_fn: null
+    can_accept_stream_before_payload: true
+    disable_direct_cuda_ipc_payload: false
+    project_payload: {}
+    comm: null
+name: qwen3-omni-colocated-h100-bf16
+processes: {}
+env_defaults:
+  SGLANG_JIT_DEEPGEMM_PRECOMPILE: '0'
+  OMP_NUM_THREADS: '8'
+  TOKENIZERS_PARALLELISM: 'false'
+mps: 'off'
+weight_share: 'off'
+placement:
+  max_total_gpu_memory_fraction_per_gpu: 1.0
+  require_memory_fraction_for_colocation: false
+placement_policy: sglang_omni.models.qwen3_omni.placement.Qwen3OmniPlacementPolicy
+endpoints:
+  base_path: /tmp/sglang_omni
+terminal_stages_fn: sglang_omni.models.qwen3_omni.request_builders.resolve_terminal_stages
+config_cls: Qwen3OmniSpeechColocatedPipelineConfig
+
+==================================================
+2026-09-09 19:57:18,062 [INFO] sglang_omni.scheduling.bootstrap: SGLang runtime configuration: gpu_id=0, sm=90, architecture=hopper, attention_backend=fa3, decode_attention_backend=fa3, prefill_attention_backend=fa3, sampling_backend=pytorc
+2026-09-09 19:57:18,063 [INFO] sglang_omni.platforms.cuda: Configured SGLang backend policy: arch=Qwen3OmniThinkerForCausalLM effective_quantization=None server_quantization=None moe_runner_backend=auto fp8_gemm_backend=auto
+
+2026-09-09 19:57:41,133 [INFO] sglang.srt.model_executor.model_runner_components.cuda_graph_setup: Capture target prefill CUDA graph begin. backend=breakable, num_tokens=[4, 8, 12, 16, 20, 24, 28, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176
+
+  0%|          | 0/42 [00:00<?, ?it/s]
+2026-09-09 19:57:55,193 [INFO] sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_config: Using MoE kernel config from /sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_7_1/E=128,N=768,d
+
+2026-09-09 19:58:19,302 [INFO] sglang.srt.model_executor.model_runner_components.cuda_graph_setup: Capture target prefill CUDA graph end. elapsed=38.17 s, mem usage=0.64 GB, avail mem=14.96 GB.
+2026-09-09 19:58:19,303 [INFO] sglang.srt.model_executor.model_runner_components.cuda_graph_setup: Capture target decode CUDA graph begin. backend=full, num_tokens_per_req=1, bs=[1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64], avail mem=14.96 
+
+  0%|          | 0/12 [00:00<?, ?it/s]
+2026-09-09 19:58:23,802 [INFO] sglang.srt.model_executor.model_runner_components.cuda_graph_setup: Capture target decode CUDA graph end. elapsed=4.50 s, mem usage=0.03 GB, avail mem=14.93 GB.
+2026-09-09 19:58:23,802 [INFO] sglang_omni.utils.cuda_graph_batch_validator: prefill CUDA graphs attested: backend=breakable buckets=[4, 8, 12, 16, 20, 24, 28, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 
+2026-09-09 19:58:25,864 [INFO] sglang_omni.scheduling.bootstrap: SGLang runtime configuration: gpu_id=0, sm=90, architecture=hopper, attention_backend=fa3, decode_attention_backend=fa3, prefill_attention_backend=fa3, sampling_backend=pytorc
+2026-09-09 19:58:25,866 [INFO] sglang_omni.platforms.cuda: Configured SGLang backend policy: arch=Qwen3OmniTalker effective_quantization=None server_quantization=None moe_runner_backend=flashinfer_cutlass fp8_gemm_backend=auto
+
+2026-09-09 19:58:35,368 [INFO] sglang.srt.model_executor.runner.flashinfer_autotune: Running FlashInfer autotune with cache: /root/.cache/sglang/flashinfer/autotune/0.6.18/sm90/aaa8eb3509be09ab/rank_tp0_pp0_dp0.json
+2026-09-09 19:58:35,387 - INFO - autotuner.py:972 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+
+[AutoTuner]: Tuning trtllm::fused_moe::gemm1:   0%|          | 0/6 [00:00<?, ?profile/s][TensorRT-LLM][INFO] Set logger level to INFO
+
+[AutoTuner]: Tuning trtllm::fused_moe::gemm1:  17%|█▋        | 1/6 [00:00<00:01,  3.63profile/s]
+[AutoTuner]: Tuning trtllm::fused_moe::gemm1:  83%|████████▎ | 5/6 [00:00<00:00, 14.12profile/s]
+[AutoTuner]: Tuning trtllm::fused_moe::gemm1: 100%|██████████| 6/6 [00:00<00:00, 12.07profile/s]
+
+[AutoTuner]: Tuning trtllm::fused_moe::gemm2:   0%|          | 0/6 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning trtllm::fused_moe::gemm2:  17%|█▋        | 1/6 [00:01<00:06,  1.31s/profile]
+[AutoTuner]: Tuning trtllm::fused_moe::gemm2:  67%|██████▋   | 4/6 [00:01<00:00,  3.55profile/s]
+[AutoTuner]: Tuning trtllm::fused_moe::gemm2: 100%|██████████| 6/6 [00:01<00:00,  4.95profile/s]
+[AutoTuner]: Tuning trtllm::fused_moe::gemm2: 100%|██████████| 6/6 [00:01<00:00,  3.68profile/s]
+2026-09-09 19:58:52,022 [INFO] sglang_omni.models.qwen3_omni.components.talker: Captured Qwen3-Omni predictor CUDA graph for batch_size=32 dtype=torch.int32
+2026-09-09 19:58:52,023 - INFO - autotuner.py:995 - flashinfer.jit: [Autotuner]: Autotuning process ends
+2026-09-09 19:58:52,031 - INFO - autotuner.py:2652 - flashinfer.jit: [Autotuner]: Saved 12 configs to /root/.cache/sglang/flashinfer/autotune/0.6.18/sm90/aaa8eb3509be09ab/rank_tp0_pp0_dp0.json (12 new, 0 from previous config)
+2026-09-09 19:58:52,031 [INFO] sglang.srt.model_executor.runner.flashinfer_autotune: FlashInfer autotune completed.
+2026-09-09 19:58:52,032 [INFO] sglang.srt.model_executor.model_runner_components.cuda_graph_setup: Capture target decode CUDA graph begin. backend=full, num_tokens_per_req=1, bs=[1, 2, 4, 8, 12, 16, 24, 32], avail mem=5.74 GB
+
+  0%|          | 0/8 [00:00<?, ?it/s]
+
+
+
+
+
+
+
+2026-09-09 19:59:00,026 [INFO] sglang.srt.model_executor.model_runner_components.cuda_graph_setup: Capture target decode CUDA graph end. elapsed=7.99 s, mem usage=0.60 GB, avail mem=5.14 GB.
+2026-09-09 19:59:00,350 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: preprocessing at ipc://<sock>
+2026-09-09 19:59:00,350 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: image_encoder at ipc://<sock>
+2026-09-09 19:59:00,350 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: audio_encoder at ipc://<sock>
+2026-09-09 19:59:00,350 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: thinker at ipc://<sock>
+2026-09-09 19:59:00,350 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: decode at ipc://<sock>
+2026-09-09 19:59:00,350 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: talker_ar at ipc://<sock>
+2026-09-09 19:59:00,350 [INFO] sglang_omni.pipeline.coordinator: Coordinator registered stage: code2wav at ipc://<sock>
+2026-09-09 19:59:00,351 [INFO] sglang_omni.serve.launcher: Pipeline 'qwen3-omni-colocated-h100-bf16' started (1 GPU(s))
+2026-09-09 19:59:01,004 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 15, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: True, 
+2026-09-09 19:59:08,146 [INFO] sglang_omni.models.qwen3_omni.components.talker: Captured Qwen3-Omni predictor CUDA graph for batch_size=1 dtype=torch.int64
+2026-09-09 19:59:08,151 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 21, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:09,974 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 14, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:10,386 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 21, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:12,246 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 17, #cached-token: 3, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: True, 
+2026-09-09 19:59:12,722 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:14,646 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 19, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:15,092 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:16,781 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 21, #cached-token: 3, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: True, 
+2026-09-09 19:59:17,489 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 30, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:20,223 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 23, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:20,912 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 30, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:24,495 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 23, #cached-token: 3, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: True, 
+2026-09-09 19:59:25,560 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 32, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:29,068 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 25, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:30,089 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 32, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:33,672 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 20, #cached-token: 3, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: True, 
+2026-09-09 19:59:34,662 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 29, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:38,048 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 22, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:39,010 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 29, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:42,235 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 14, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:42,635 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 21, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:44,329 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 14, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:44,728 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 21, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:46,627 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 19, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:47,064 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:48,764 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 19, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:49,209 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:51,100 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 23, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:51,782 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 30, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:53,958 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 23, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:54,637 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 30, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:57,839 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 25, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 19:59:58,826 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 32, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 20:00:27,723 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 25, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 20:00:28,771 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 32, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 20:00:32,496 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 22, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 20:00:33,442 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 29, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 20:00:36,524 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 1, #cached-token: 22, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,
+2026-09-09 20:00:37,496 [INFO] sglang.srt.managers.scheduler_components.metrics_reporter: Prefill batch, #new-seq: 1, #new-token: 29, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False,

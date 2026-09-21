@@ -245,13 +245,21 @@ class PrefetchedBlockingStreamingSpeechClient:
 
 
 class TwoChunkStreamingSpeechClient:
-    def __init__(self, *, fail_after_first_chunk: bool = False) -> None:
+    def __init__(
+        self, *, fail_after_first_chunk: bool = False, usage_first: bool = False
+    ) -> None:
         self.fail_after_first_chunk = fail_after_first_chunk
+        self.usage_first = usage_first
         self.aborted: list[str] = []
 
     async def generate(
         self, request: GenerateRequest, request_id: str | None = None
     ) -> AsyncIterator[GenerateChunk]:
+        usage = UsageInfo(prompt_tokens=3, completion_tokens=2, total_tokens=5)
+        if self.usage_first:
+            yield GenerateChunk(
+                request_id=request_id or "speech-1", modality="audio", usage=usage
+            )
         yield GenerateChunk(
             request_id=request_id or "speech-1",
             modality="audio",
@@ -270,7 +278,7 @@ class TwoChunkStreamingSpeechClient:
             request_id=request_id or "speech-1",
             modality="audio",
             finish_reason="stop",
-            usage=UsageInfo(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+            usage=None if self.usage_first else usage,
         )
 
     async def abort(self, request_id: str) -> None:
@@ -1377,8 +1385,15 @@ def test_raw_pcm_response_disconnect_before_first_chunk_aborts_request() -> None
     asyncio.run(_drive())
 
 
-def test_speech_sse_stream_sends_deltas_then_done_with_usage() -> None:
-    client = TestClient(create_app(TwoChunkStreamingSpeechClient(), model_name="tts"))
+@pytest.mark.parametrize("usage_first", [False, True])
+def test_speech_sse_stream_sends_deltas_then_done_with_usage(
+    usage_first: bool,
+) -> None:
+    client = TestClient(
+        create_app(
+            TwoChunkStreamingSpeechClient(usage_first=usage_first), model_name="tts"
+        )
+    )
 
     response = client.post(
         "/v1/audio/speech",

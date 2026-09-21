@@ -1516,7 +1516,8 @@ async def speech_audio_response(
             except StopAsyncIteration:
                 stream_completed = True
                 break
-            final_usage = chunk.usage
+            if chunk.usage is not None:
+                final_usage = chunk.usage
             if chunk.audio_data is None:
                 continue
 
@@ -1555,7 +1556,8 @@ async def speech_audio_response(
             yield first_audio_bytes
 
             async for chunk in chunk_stream:
-                final_usage = chunk.usage
+                if chunk.usage is not None:
+                    final_usage = chunk.usage
                 if chunk.audio_data is None:
                     continue
 

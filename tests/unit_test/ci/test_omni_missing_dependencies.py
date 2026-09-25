@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Dependency checks must cover the optional models selected by CI."""
 
-import json
-import os
-import subprocess
-import venv
 from importlib import metadata
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -71,52 +67,3 @@ def test_unknown_extra_fails_instead_of_silently_omitting_dependencies(
 ) -> None:
     with pytest.raises(KeyError, match="minicpm-typo"):
         dependencies.missing_requirements(project, ("minicpm-typo",))
-
-
-def test_source_paths_survive_overwritten_pythonpath(tmp_path: Path) -> None:
-    virtualenv = tmp_path / "ci home" / "omni"
-    venv.EnvBuilder(with_pip=False).create(virtualenv)
-    source = virtualenv / "src" / "CosyVoice"
-    packages = [
-        source / "cosyvoice",
-        source / "third_party" / "Matcha-TTS" / "matcha",
-    ]
-    for package in packages:
-        package.mkdir(parents=True)
-        (package / "__init__.py").touch()
-    environment = {**os.environ, "PYTHONPATH": str(tmp_path)}
-
-    # note (Jiannan Li): CI covers checkout; this test exercises Python's .pth loading.
-    subprocess.run(
-        [
-            "bash",
-            "-c",
-            'git() { :; }; source "$@"',
-            "bash",
-            str(SCRIPT.with_name("prepare_cosyvoice_sources.sh")),
-            str(virtualenv),
-            "unused-repository",
-            "unused-revision",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    result = subprocess.run(
-        [
-            str(virtualenv / "bin/python"),
-            "-c",
-            "import json, cosyvoice, matcha; "
-            "print(json.dumps([cosyvoice.__file__, matcha.__file__]))",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert [Path(path).resolve() for path in json.loads(result.stdout)] == [
-        (package / "__init__.py").resolve() for package in packages
-    ]

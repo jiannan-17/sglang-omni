@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Strict gate for reusing an existing OMNI_CI_HOME venv across workflow runs.
 #
-# Checks path safety, pyproject.toml fingerprint (when recorded), import probe,
+# Checks path safety, dependency fingerprint (when recorded), import probe,
 # and exact == pins. Missing .deps-hash is allowed when the venv itself matches
 # pyproject.toml (e.g. prior setup installed packages but failed a post-install gate).
 # Does not require .omni-env-complete (downstream jobs use this gate; setup writes marker).

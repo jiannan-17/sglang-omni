@@ -19,7 +19,7 @@ from sglang_omni.serve.speech_errors import SpeechAPIError
 from sglang_omni.serve.speech_service import SpeechRequestValidator
 
 
-class _MockHTTPConnection:
+class MockHTTPConnection:
     def __init__(self, handler) -> None:
         self.client = httpx.Client(transport=httpx.MockTransport(handler))
 
@@ -27,7 +27,7 @@ class _MockHTTPConnection:
         return self.client
 
 
-def _public_test_addresses(hostname: str) -> tuple[ipaddress.IPv4Address, ...]:
+def public_test_addresses(hostname: str) -> tuple[ipaddress.IPv4Address, ...]:
     del hostname
     return (ipaddress.ip_address("93.184.216.34"),)
 
@@ -476,9 +476,9 @@ def test_reference_audio_accepts_allowed_https(
     monkeypatch.setattr(
         resource_connector,
         "resolve_remote_addresses",
-        _public_test_addresses,
+        public_test_addresses,
     )
-    service.reference_connector.connection = _MockHTTPConnection(
+    service.reference_connector.connection = MockHTTPConnection(
         lambda request: httpx.Response(
             200,
             headers={"content-type": "audio/wav"},
@@ -515,9 +515,9 @@ def test_reference_audio_accepts_public_https_by_default(
     monkeypatch.setattr(
         resource_connector,
         "resolve_remote_addresses",
-        _public_test_addresses,
+        public_test_addresses,
     )
-    service.reference_connector.connection = _MockHTTPConnection(
+    service.reference_connector.connection = MockHTTPConnection(
         lambda request: httpx.Response(
             200,
             headers={"content-type": "audio/wav"},
@@ -607,9 +607,9 @@ def test_reference_audio_rejects_http_status_with_speech_error(
     monkeypatch.setattr(
         resource_connector,
         "resolve_remote_addresses",
-        _public_test_addresses,
+        public_test_addresses,
     )
-    service.reference_connector.connection = _MockHTTPConnection(
+    service.reference_connector.connection = MockHTTPConnection(
         lambda request: httpx.Response(404)
     )
 
@@ -666,9 +666,9 @@ def test_reference_audio_revalidates_redirect_domains(
     monkeypatch.setattr(
         resource_connector,
         "resolve_remote_addresses",
-        _public_test_addresses,
+        public_test_addresses,
     )
-    service.reference_connector.connection = _MockHTTPConnection(
+    service.reference_connector.connection = MockHTTPConnection(
         lambda request: httpx.Response(
             302,
             headers={"location": "https://blocked.example/reference.wav"},
@@ -694,9 +694,9 @@ def test_reference_audio_allows_configured_domain_suffix_redirect(
     monkeypatch.setattr(
         resource_connector,
         "resolve_remote_addresses",
-        _public_test_addresses,
+        public_test_addresses,
     )
-    service.reference_connector.connection = _MockHTTPConnection(
+    service.reference_connector.connection = MockHTTPConnection(
         lambda request: (
             httpx.Response(
                 302,
@@ -727,7 +727,7 @@ def test_reference_audio_revalidates_redirect_addresses(
     ) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
         if hostname == "private.example":
             return (ipaddress.ip_address("10.0.0.1"),)
-        return _public_test_addresses(hostname)
+        return public_test_addresses(hostname)
 
     service = SpeechRequestValidator(
         default_model="tts",
@@ -738,7 +738,7 @@ def test_reference_audio_revalidates_redirect_addresses(
         "resolve_remote_addresses",
         resolve_addresses,
     )
-    service.reference_connector.connection = _MockHTTPConnection(
+    service.reference_connector.connection = MockHTTPConnection(
         lambda request: httpx.Response(
             302,
             headers={"location": "https://private.example/reference.wav"},
@@ -765,9 +765,9 @@ def test_reference_audio_rejects_oversized_https_response(
     monkeypatch.setattr(
         resource_connector,
         "resolve_remote_addresses",
-        _public_test_addresses,
+        public_test_addresses,
     )
-    service.reference_connector.connection = _MockHTTPConnection(
+    service.reference_connector.connection = MockHTTPConnection(
         lambda request: httpx.Response(
             200,
             headers={"content-type": "audio/wav"},

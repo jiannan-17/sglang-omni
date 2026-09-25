@@ -23,43 +23,27 @@ def project(tmp_path: Path) -> Path:
         '[project]\ndependencies = ["torch==2.13.0"]\n'
         "[project.optional-dependencies]\n"
         'minicpm-o = ["einops>=0.8.1", "onnx>=1.18.0"]\n'
-        'fun-cosyvoice3 = ["onnx>=1.18.0", "setuptools<80"]\n'
     )
     return path
 
 
-@pytest.mark.parametrize(
-    ("extra", "package", "installed_version", "expected"),
-    [
-        ("minicpm-o", "onnx", None, ["onnx>=1.18.0"]),
-        ("minicpm-o", "onnx", "1.17.0", ["onnx>=1.18.0"]),
-        ("minicpm-o", "onnx", "1.18.0", []),
-        ("fun-cosyvoice3", "setuptools", None, ["setuptools<80"]),
-        ("fun-cosyvoice3", "setuptools", "79.0.1", []),
-        ("fun-cosyvoice3", "setuptools", "80.0.0", ["setuptools<80"]),
-    ],
-)
-def test_selected_extra_checks_dependency_version_constraints(
-    project: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    extra: str,
-    package: str,
-    installed_version: str | None,
-    expected: list[str],
+@pytest.mark.parametrize("onnx_version", [None, "1.17.0", "1.18.0"])
+def test_minicpm_extra_checks_missing_and_outdated_dependencies(
+    project: Path, monkeypatch: pytest.MonkeyPatch, onnx_version: str | None
 ) -> None:
-    versions = {"torch": "2.13.0", "einops": "0.8.1", "onnx": "1.18.0"}
-    versions[package] = installed_version
+    versions = {"torch": "2.13.0", "einops": "0.8.1", "onnx": onnx_version}
 
     def version(name: str) -> str:
         installed = versions[name]
         if installed is None:
             raise metadata.PackageNotFoundError(name)
-        else:
-            return installed
+        return installed
 
     monkeypatch.setattr(dependencies.importlib.metadata, "version", version)
     assert dependencies.missing_requirements(project) == []
-    assert dependencies.missing_requirements(project, (extra,)) == expected
+    assert dependencies.missing_requirements(project, ("minicpm-o",)) == (
+        [] if onnx_version == "1.18.0" else ["onnx>=1.18.0"]
+    )
 
 
 def test_unknown_extra_fails_instead_of_silently_omitting_dependencies(

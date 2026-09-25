@@ -7,5 +7,7 @@ omni_ci_deps_hash() {
     echo "pyproject.toml not found in $(pwd)" >&2
     return 1
   fi
-  cat pyproject.toml "$(dirname "${BASH_SOURCE[0]}")/prepare_omni_venv.sh" | sha256sum | awk '{print $1}'
+  cat pyproject.toml \
+    "$(dirname "${BASH_SOURCE[0]}")/prepare_omni_venv.sh" \
+    "$(dirname "${BASH_SOURCE[0]}")/prepare_cosyvoice_sources.sh" | sha256sum | awk '{print $1}'
 }

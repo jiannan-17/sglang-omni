@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Dependency checks must cover the optional models selected by CI."""
 
+import json
 import os
 import subprocess
-import sys
 import venv
 from importlib import metadata
 from importlib.util import module_from_spec, spec_from_file_location
@@ -27,7 +27,6 @@ def project(tmp_path: Path) -> Path:
         '[project]\ndependencies = ["torch==2.13.0"]\n'
         "[project.optional-dependencies]\n"
         'minicpm-o = ["einops>=0.8.1", "onnx>=1.18.0"]\n'
-        'fun-cosyvoice3 = ["conformer==0.3.2", "setuptools<80"]\n'
     )
     return path
 
@@ -58,122 +57,117 @@ def test_unknown_extra_fails_instead_of_silently_omitting_dependencies(
         dependencies.missing_requirements(project, ("minicpm-typo",))
 
 
-@pytest.mark.parametrize(
-    ("conformer_version", "setuptools_version", "expected"),
-    [
-        (None, "79.0.1", ["conformer==0.3.2"]),
-        ("0.3.1", "79.0.1", ["conformer==0.3.2"]),
-        ("0.3.2", "80.0.0", ["setuptools<80"]),
-        ("0.3.2", "79.0.1", []),
-    ],
-)
-def test_ci_extras_cli_checks_cosyvoice_dependencies(
-    project: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    conformer_version: str | None,
-    setuptools_version: str,
-    expected: list[str],
-) -> None:
-    versions = {
-        "torch": "2.13.0",
-        "einops": "0.8.1",
-        "onnx": "1.18.0",
-        "conformer": conformer_version,
-        "setuptools": setuptools_version,
-    }
-
-    def version(name: str) -> str:
-        installed = versions[name]
-        if installed is None:
-            raise metadata.PackageNotFoundError(name)
-        else:
-            return installed
-
-    monkeypatch.setattr(dependencies.importlib.metadata, "version", version)
-    arguments = [
-        str(SCRIPT),
-        "--extra",
-        "minicpm-o",
-        "--extra",
-        "fun-cosyvoice3",
-        str(project),
-    ]
-    monkeypatch.setattr(sys, "argv", arguments)
-    assert dependencies.main() == 0
-    assert capsys.readouterr().out.split() == expected
-
-    monkeypatch.setattr(sys, "argv", [*arguments, "--check"])
-    assert dependencies.main() == int(bool(expected))
-    output = capsys.readouterr().out
-    for requirement in expected:
-        assert requirement in output
-
-
-@pytest.mark.parametrize("missing_package", [None, "cosyvoice", "matcha"])
-def test_import_probe_rejects_missing_cosyvoice_sources(
-    tmp_path: Path, missing_package: str | None
-) -> None:
-    modules = {
-        "av.py": "",
-        "llama_cpp.py": "",
-        "torch.py": "",
-        "transformers.py": "",
-        "sglang.py": "",
-        "zhon/hanzi.py": "",
-        "whisper/normalizers.py": "EnglishTextNormalizer = None\n",
-        "sglang_omni/models/qwen3_tts/compat.py": (
-            "def apply_qwen_tts_transformers_compatibility_patches(): pass\n"
-        ),
-        "qwen_tts.py": "Qwen3TTSModel = Qwen3TTSTokenizer = None\n",
-        "dac.py": "",
-        "neucodec.py": "NeuCodec = None\n",
-        "cosyvoice/cli/cosyvoice.py": "CosyVoice3 = None\n",
-        "matcha/models/components/flow_matching.py": "BASECFM = None\n",
-    }
-    for relative_path, content in modules.items():
-        if relative_path.split("/")[0] == missing_package:
-            continue
-        else:
-            target = tmp_path / relative_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content)
-
-    venv.EnvBuilder(with_pip=False).create(tmp_path / "omni")
-    executable = tmp_path / "omni/bin/python"
-    sox = executable.with_name("sox")
-    sox.write_text("#!/bin/sh\nexit 0\n")
-    sox.chmod(0o755)
-    result = subprocess.run(
-        ["bash", str(SCRIPT.with_name("validate_omni_venv_imports.sh")), "omni"],
-        cwd=tmp_path,
-        env={
-            **os.environ,
-            "OMNI_CI_HOME": str(tmp_path),
-            "PYTHONPATH": str(tmp_path),
-            "PATH": f"{executable.parent}{os.pathsep}{os.environ['PATH']}",
-        },
+def run_git(repository: Path, arguments: list[str]) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        check=True,
         capture_output=True,
         text=True,
-        check=False,
+    ).stdout.strip()
+
+
+@pytest.fixture
+def source_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, str]:
+    for key, value in {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_ALLOW_PROTOCOL": "file",
+        "GIT_AUTHOR_NAME": "CI Test",
+        "GIT_AUTHOR_EMAIL": "ci@example.invalid",
+        "GIT_COMMITTER_NAME": "CI Test",
+        "GIT_COMMITTER_EMAIL": "ci@example.invalid",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    for package in ("matcha", "cosyvoice"):
+        repository = tmp_path / f"{package}-repository"
+        (repository / package).mkdir(parents=True)
+        (repository / package / "__init__.py").write_text("REVISION = 'pinned'\n")
+        run_git(repository, ["init", "--quiet"])
+        run_git(repository, ["add", "."])
+        run_git(repository, ["commit", "--quiet", "-m", "Initial source"])
+
+    cosyvoice = tmp_path / "cosyvoice-repository"
+    matcha = tmp_path / "matcha-repository"
+    run_git(
+        cosyvoice,
+        ["submodule", "add", matcha.as_uri(), "third_party/Matcha-TTS"],
     )
-    if missing_package is None:
-        assert result.returncode == 0, result.stderr
+    run_git(cosyvoice, ["commit", "--quiet", "-am", "Pin Matcha source"])
+    revision = run_git(cosyvoice, ["rev-parse", "HEAD"])
+    for repository, package in ((cosyvoice, "cosyvoice"), (matcha, "matcha")):
+        (repository / package / "__init__.py").write_text("REVISION = 'newer'\n")
+        run_git(repository, ["commit", "--quiet", "-am", "Advance source branch"])
+    return cosyvoice, revision
+
+
+@pytest.mark.parametrize("valid_revision", [True, False])
+def test_source_setup_with_overwritten_pythonpath(
+    tmp_path: Path, source_repository: tuple[Path, str], valid_revision: bool
+) -> None:
+    repository, revision = source_repository
+    virtualenv = tmp_path / "ci home" / "omni"
+    venv.EnvBuilder(with_pip=False).create(virtualenv)
+    project = tmp_path / "project"
+    project.mkdir()
+    environment = {**os.environ, "PYTHONPATH": str(project)}
+    probe = [
+        str(virtualenv / "bin/python"),
+        "-c",
+        "import json, cosyvoice, matcha; "
+        "print(json.dumps([[package.REVISION, package.__file__] "
+        "for package in (cosyvoice, matcha)]))",
+    ]
+    before = subprocess.run(
+        probe, cwd=project, env=environment, capture_output=True, text=True
+    )
+    assert before.returncode != 0
+    assert "No module named 'cosyvoice'" in before.stderr
+
+    setup = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT.with_name("prepare_cosyvoice_sources.sh")),
+            str(virtualenv),
+            repository.as_uri(),
+            revision if valid_revision else "0" * 40,
+        ],
+        cwd=project,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    after = subprocess.run(
+        probe, cwd=project, env=environment, capture_output=True, text=True
+    )
+    if valid_revision:
+        assert setup.returncode == 0, setup.stderr
+        assert after.returncode == 0, after.stderr
+        for installed_revision, source_path in json.loads(after.stdout):
+            assert installed_revision == "pinned"
+            assert Path(source_path).is_relative_to(virtualenv.resolve())
     else:
-        assert result.returncode != 0
-        assert f"No module named '{missing_package}'" in result.stderr
+        assert setup.returncode != 0
+        assert after.returncode != 0
 
 
-def test_ci_dependency_fingerprint_tracks_source_preparation(tmp_path: Path) -> None:
-    project = tmp_path / "pyproject.toml"
-    project.write_text("[project]\ndependencies = []\n")
-    prepare = tmp_path / "prepare_omni_venv.sh"
-    prepare.write_text("COSYVOICE_COMMIT=old\n")
+@pytest.mark.parametrize(
+    "changed_script", ["prepare_omni_venv.sh", "prepare_cosyvoice_sources.sh"]
+)
+def test_ci_dependency_fingerprint_tracks_source_preparation(
+    tmp_path: Path, changed_script: str
+) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\ndependencies = []\n")
+    for name in ("prepare_omni_venv.sh", "prepare_cosyvoice_sources.sh"):
+        (tmp_path / name).write_text(SCRIPT.with_name(name).read_text())
     fingerprint = tmp_path / "omni_ci_deps_hash.sh"
     fingerprint.write_text(SCRIPT.with_name("omni_ci_deps_hash.sh").read_text())
     hashes = []
-    for content in ("COSYVOICE_COMMIT=old\n", "COSYVOICE_COMMIT=new\n"):
-        prepare.write_text(content)
+    for appended_content in ("", "\n# Updated source preparation\n"):
+        with (tmp_path / changed_script).open("a") as script:
+            script.write(appended_content)
         result = subprocess.run(
             ["bash", "-c", 'source "$1"; omni_ci_deps_hash', "bash", str(fingerprint)],
             cwd=tmp_path,

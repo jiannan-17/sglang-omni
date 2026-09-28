@@ -340,6 +340,10 @@ independent utterances. Batch defaults are merged with each item. Item fields
 override the defaults, and each item runs through the normal `/v1/audio/speech`
 path.
 
+Batch speech does not support streaming, including `stream_format="sse"`.
+It returns a single JSON response containing the completed results. For streaming
+output, use `/v1/audio/speech`.
+
 ```bash
 curl -X POST http://localhost:8000/v1/audio/speech/batch \
   -H "Content-Type: application/json" \

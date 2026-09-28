@@ -674,9 +674,15 @@ class SpeechRequestValidator:
                 "stream is not supported for batch speech requests",
                 param=f"items.{index}.stream",
             )
+        elif item_payload.get("stream_format") == "sse":
+            raise bad_request(
+                "stream is not supported for batch speech requests",
+                param=f"items.{index}.stream_format",
+            )
         else:
             pass
         payload.pop("stream", None)
+        payload.pop("stream_format", None)
         try:
             return CreateSpeechRequest.model_validate(payload)
         except ValidationError as exc:
